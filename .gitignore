@@ -1,0 +1,7 @@
+.env
+.env.*
+*credentials*.json
+*token*.json
+node_modules/
+dist/
+data/snapshots/
