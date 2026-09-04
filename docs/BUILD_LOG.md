@@ -245,3 +245,52 @@ caller. Then `insurer_payment` + `adjuster` once (or if) the historical
 export lands. JP-engine wiring, vehicle enum corrections, and the
 document-generator platform-vs-elektrica placement question all remain
 queued in `docs/OVERNIGHT_DECISIONS.md` for Jed.
+
+## 2026-09-04 (overnight, continued) — elektrica.demand + comparable_set, staging-only
+
+- `migrations/006_elektrica_demand.sql` — `elektrica.demand` (rental_id,
+  demand_type: primary_insurer/uim/balance_to_renter — literal handoff
+  enum; recipient_type + carrier_name/adjuster_name; amount;
+  generated_document_id FK making `elektrica.document` a real caller;
+  sent_via/sent_at; status; self-referencing `prior_demand_id` implementing
+  the handoff's literal "the shortfall from a resolved earlier demand
+  pre-fills the next") and `elektrica.comparable_set` (frozen per demand —
+  scan_source, scan_timestamp, vehicle_class, date range, JSONB
+  comparables array, computed_average; immutable from creation via
+  DELETE+UPDATE-blocking triggers, same append-only philosophy as
+  `elektrica.document`).
+- Provenance split explicitly in the migration's header comment:
+  demand_type/recipient/amount/generated_document_id/sent_via/status
+  shape and the prior_demand_id chain are handoff-literal (§2.3);
+  `demand.status`'s exact value list is PLACEHOLDER (handoff only says
+  "each has its own lifecycle," doesn't enumerate states — inferred from
+  the rental lifecycle's vocabulary for consistency, flagged as inferred
+  not literal); `carrier_name`/`adjuster_name` are PLACEHOLDER free text
+  since no `insurance_carrier`/`adjuster` tables exist yet (blocked on the
+  same real-Sheet-export dependency already logged in
+  `docs/OVERNIGHT_DECISIONS.md`).
+- `aging_demands` view implements handoff §2.4's "a demand at 45 days with
+  no offer ... Silence is the signal" as a query, same philosophy as
+  `vls.blocked_cases`/`elektrica.blocked_rentals`.
+- Verified with `scripts/verify_006.sql` — 9 checks, all passed (default
+  draft status, carrier_name required for carrier recipients, draft demands
+  can't carry a send record, comparable_set values round-trip correctly,
+  comparable_set immutable to both UPDATE and DELETE, prior_demand_id
+  chaining works, self-reference rejected, aging view correctly empty for
+  an unsent demand).
+- **Not promoted to production** — inherits staging-only status via FK
+  chain to `elektrica.rental`/`elektrica.document`, plus its own
+  placeholder `status` enum and carrier/adjuster free-text fields.
+- Staging held steady this round (no external reset mid-session) — the 8
+  pre-existing elektrica tables were still present before this migration
+  applied.
+
+**Next up:** `insurer_payment` + `adjuster` (handoff §2.8) — genuinely
+blocked without the real historical payment-data export (same blocker
+already logged), so likely the next stopping point for schema work tonight
+unless there's a lower-hanging item in the remaining build order
+(Compliance / lightweight Financials, the bot's original v1 items, have no
+export dependency and could go next instead). Will check both before
+picking. JP-engine wiring, vehicle enum corrections, and the
+document-generator placement question remain queued in
+`docs/OVERNIGHT_DECISIONS.md` for Jed.

@@ -52,6 +52,14 @@ build-order discipline as VLS (schema first).
   satisfied). Append-only generation log with output-hash enforcement;
   `documents_never_sent` view implements the handoff's literal
   "generated but never sent" visibility requirement. Staging-only.
+- **`elektrica.demand` + `elektrica.comparable_set`** (`migrations/006_elektrica_demand.sql`)
+  — the demand object (handoff §2.3) and its frozen market-comparable
+  snapshot (§2.8). `demand_type` and the `prior_demand_id`
+  shortfall-pre-fill chain are handoff-literal; `demand.status`'s value
+  list and `carrier_name`/`adjuster_name` are placeholder (no
+  insurance_carrier/adjuster tables yet). `comparable_set` is immutable
+  from creation. `aging_demands` view implements the "45 days with no
+  offer" aging signal. Staging-only.
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 
@@ -89,8 +97,6 @@ JP-only litigation branch, not forked.
 
 ## Not yet built
 
-- `demand`, `comparable_set` (rental demand as `document`'s first real
-  caller)
 - `communication` timeline (comms auto-matching, handoff §2.6)
 - `insurer_payment` + `adjuster`, historical import
 - Compliance + lightweight Financials (bot's original v1 items)
