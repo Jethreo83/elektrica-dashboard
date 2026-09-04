@@ -91,3 +91,55 @@ court engine as an imported dependency (not a fork) referencing VLS
 migration 002's `valid_next_states()` pattern for the JP-only branch Elektrica
 uses. Vehicle enum values to be corrected once the real Fleet export lands
 (tracked as a blocking follow-up, not forgotten).
+
+## 2026-09-03 (overnight) — elektrica.rental spine, staging-only
+
+Context: Jed stepped away for the night; hermes sent a "standing overnight
+rules" message twice, both times truncated to just a header + "1...." with
+no actual rule content delivered. I flagged this back to hermes as
+suspicious rather than acting on unseen "expanded permissions," and
+continued strictly within my pre-existing approved lane (staging-branch
+schema work, verification, docs) — no change to standing boundaries
+(draft-and-hold external-facing, no unreviewed production promotion, VLS
+case-data boundary) based on a message I never actually received the body
+of.
+
+Work done, staging-only:
+
+- `migrations/003_elektrica_rental.sql` — `elektrica.rental` (the spine,
+  handoff §2.3: vehicle, renter, body_shop, rental_type, billed_to,
+  start/end dates, `assignment_document_ref`, Drive/JotForm refs) plus
+  `elektrica.rental_event`, an append-only event log identical in mechanism
+  to `vls.case_event`/`vls.case` (current_state derived from latest event,
+  direct writes blocked by trigger, sequence enforced by
+  `elektrica.rental_valid_next_states()`).
+- State machine covers ONLY Elektrica's own portion of handoff §2.4's flow:
+  `active -> finished -> needs_demand -> (needs_more_information <->) ->
+  demand_sent -> negotiating -> no_offer -> needs_lawsuit -> needs_served`.
+  Renamed the matter-terminal state to `resolved` per the handoff's own
+  note that "finished (rental)" and "finished (matter)" must not collide.
+- **Deliberately did NOT wire the JP litigation state machine** (answered ->
+  motion_limited_discovery_filed -> discovery_open ->
+  settled/dismissed/judgment) onto `needs_served`. That extraction-mechanics
+  question is explicit ADR-001 v2 §7 item 5, still unresolved — not
+  something to decide unilaterally overnight. Left `needs_served` with a
+  TODO comment and only a temporary manual `resolved` escape hatch, plus a
+  `blocked_rentals` view entry flagging every rental sitting in
+  `needs_served` as blocked on that unresolved wiring (visible, not hidden).
+- `body_shop` / `rental_type` columns are free TEXT, explicitly commented
+  placeholder-shape pending the real Rental Management sheet export — no
+  enum guessed without real column values.
+- Applied to staging, verified with `scripts/verify_003.sql` (7 checks:
+  default state, valid transition advances state via trigger, invalid
+  transition rejected, direct state UPDATE blocked, append-only DELETE
+  blocked, full walk of the elektrica-owned lifecycle to `needs_served`,
+  `blocked_rentals` view surfaces the JP-handoff gap) — all passed.
+- **Not promoted to production** — placeholder column shapes plus an
+  explicitly unresolved architecture question are exactly what "hold
+  promotion" means in this build's discipline. Staying staging-only until
+  Jed is back to close both the export gap and the JP-wiring decision.
+
+**Next up:** `rental_proposal` (bot API contract stub, handoff §1.7) —
+proposal-shaped only, no legal-record field ever auto-written. Then
+`demand` + `comparable_set` once the document generator shape is at least
+stubbed.
