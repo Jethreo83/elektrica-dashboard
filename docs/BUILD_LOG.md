@@ -196,3 +196,52 @@ scoped first to rental demand letters per ADR-001 v2 section 4's
 instruction to build it now. Then `demand`/`comparable_set`. JP-engine
 wiring and the vehicle enum corrections remain queued in
 `docs/OVERNIGHT_DECISIONS.md` for Jed.
+
+## 2026-09-04 (overnight, continued) — document generator storage/log, staging-only
+
+- `migrations/005_elektrica_document.sql` — `document_template` (versioned,
+  family enum scoped to Rentals-only callers: rental_demand,
+  rental_agreement, return_agreement, dv_request_letter — Consulting/Sales
+  template families explicitly excluded, out of scope per ADR §3),
+  `document` (append-only generation log: template_id, source_table +
+  source_id, frozen `merge_data`, ordered `attachments`, `output_ref` +
+  `output_hash`), `outbound_log` (separate send-tracking step, append-only),
+  and a `documents_never_sent` view implementing the handoff's literal
+  phrase "generated but never sent" as a query. No placeholder fields —
+  every column is a literal requirement from handoff §1.3's own spec.
+- **Scope decision, logged not guessed:** built this inside the `elektrica`
+  schema, not `platform.*`, even though handoff §1.3 frames the document
+  generator as a shared platform primitive. Reasoning: VLS hasn't built one
+  yet (confirmed in the handoff itself — "neither VLS nor you have built
+  one yet"), so ADR-001's own extraction rule ("extract only when a second
+  consumer exists") isn't satisfied. Deciding to physically place shared
+  infra in `platform.*` ahead of a second real consumer is a
+  cross-business architecture call — logged as a queued item in
+  `docs/OVERNIGHT_DECISIONS.md` rather than defaulted into overnight. The
+  schema is written extraction-ready (template_id/version, merge_data,
+  attachments, output_hash — the exact contract handoff §1.3 specifies) so
+  moving it to `platform.*` later is a rename + grant change, not a
+  redesign.
+- Staging churned again overnight (lost all elektrica tables except
+  `renter` between migration 004 and 005 work — some other process is
+  resetting the shared staging branch, not just VLS's own migrations).
+  Reapplied 002/003/004 before 005 would apply cleanly each time. Flagging
+  this as an operational friction point, not a blocker: staging is meant to
+  be disposable, but frequent resets mid-session cost real time re-running
+  known-good migrations. Worth raising with hermes whether VLS and
+  Elektrica should get separate staging branches within the same Neon
+  project, to stop stepping on each other's overnight work.
+- Verified with `scripts/verify_005.sql` — 8 checks, all passed
+  (template uniqueness, `output_hash` required once `output_ref` is set,
+  append-only enforcement on both `document` and `outbound_log`, and the
+  `documents_never_sent` view correctly clearing once a send is logged).
+- **Not promoted to production** — inherits staging-only status via its FK
+  chain to `elektrica.rental` (same mechanical reason as migration 004),
+  not because of anything wrong with its own shape.
+
+**Next up:** `demand` + `comparable_set` (handoff §2.3/§2.8) — the actual
+rental-demand business object that will become `document`'s first real
+caller. Then `insurer_payment` + `adjuster` once (or if) the historical
+export lands. JP-engine wiring, vehicle enum corrections, and the
+document-generator platform-vs-elektrica placement question all remain
+queued in `docs/OVERNIGHT_DECISIONS.md` for Jed.

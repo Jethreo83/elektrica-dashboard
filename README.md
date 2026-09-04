@@ -43,6 +43,15 @@ build-order discipline as VLS (schema first).
   pending -> accepted/rejected decision; accepting a proposal never
   auto-writes `elektrica.rental`, by design. Inherits staging-only status
   mechanically via its FK to `elektrica.rental`.
+- **`elektrica.document_template` / `elektrica.document` / `elektrica.outbound_log`**
+  (`migrations/005_elektrica_document.sql`) — document generator
+  storage/log layer (handoff §1.3), scoped to Rentals template families
+  only. Built inside `elektrica`, not `platform.*` — queued as an open
+  placement decision in `docs/OVERNIGHT_DECISIONS.md` since VLS hasn't
+  built a document generator yet (ADR-001's extraction rule isn't
+  satisfied). Append-only generation log with output-hash enforcement;
+  `documents_never_sent` view implements the handoff's literal
+  "generated but never sent" visibility requirement. Staging-only.
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 
@@ -80,9 +89,9 @@ JP-only litigation branch, not forked.
 
 ## Not yet built
 
-- `demand`, `comparable_set`, shared document generator (rental demand
-  letters as first real caller)
-- `outbound_log`, `communication` timeline
+- `demand`, `comparable_set` (rental demand as `document`'s first real
+  caller)
+- `communication` timeline (comms auto-matching, handoff §2.6)
 - `insurer_payment` + `adjuster`, historical import
 - Compliance + lightweight Financials (bot's original v1 items)
 - Backend/API server, frontend (deliberately last, per ADR-001)

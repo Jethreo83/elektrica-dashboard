@@ -54,6 +54,37 @@ two copies of the same 12-state machine.
 
 ---
 
+## PENDING — Document generator: build inside `elektrica` schema, not `platform.*`
+
+**What:** Handoff §1.3 frames the shared document generator as a platform
+primitive both VLS and Elektrica need. Migration 005 built its storage/log
+tables (`document_template`, `document`, `outbound_log`) inside the
+`elektrica` schema instead of `platform.*`.
+
+**Why queued instead of just done:** ADR-001's extraction rule is "extract
+only when a second consumer exists." VLS hasn't built a document generator
+yet (confirmed in the handoff: "neither VLS nor you have built one yet"),
+so there's no second real consumer to justify a `platform.*` placement
+tonight. But this is genuinely a cross-cutting architecture call — where
+shared infrastructure physically lives affects both businesses' schemas —
+so I'm not treating "I think the rule says elektrica-schema-for-now" as
+equivalent to Jed or hermes actually deciding that.
+
+**What happens if we wait:** Elektrica's rental-demand document flow keeps
+building on the elektrica-schema version, fully functional for Elektrica's
+own use. If Jed/hermes later want it moved to `platform.*` once VLS builds
+its own document needs, it's a straightforward move — the schema was
+written to the handoff's exact platform-primitive contract
+(template_id/version, merge_data, attachments, output_hash) specifically
+so relocation is a rename + grant change, not a redesign.
+
+**What happens if I proceed differently:** Building directly in
+`platform.*` now would preemptively couple VLS to a schema shape neither
+VLS nor Jed has reviewed, for a feature VLS hasn't asked for yet — higher
+risk than waiting, not lower.
+
+---
+
 ## BLOCKER — Real Fleet / carrier / insurer-payment Sheet exports
 
 **What:** Kay's `CLAUDE_TO_KAY_006` export tasking (Fleet sheet, insurance
