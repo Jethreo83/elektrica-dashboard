@@ -6,7 +6,7 @@
 -- migration 004) already use: id, person_id, google_email, role enum,
 -- active flag.
 --
--- FIELD PROVENANCE — read this before promoting:
+-- FIELD PROVENANCE:
 --   - Table SHAPE (id, person_id, google_email, role, active,
 --     provisioned_by, audit columns) is directly modeled on
 --     vls.staff_user (read directly, VLS migration 005 — I have Jed's
@@ -21,25 +21,22 @@
 --     direct source I have no record of, presumably a doc or Jed's own
 --     statement) but real, not guessed — flagging the distinction rather
 --     than overstating confidence.
---   - ROLE ENUM VALUES: PLACEHOLDER. No source document (ADR v2,
---     ELEKTRICA_HANDOFF, original-bot-plan.md) names Elektrica staff
+--   - ROLE ENUM VALUES: CONFIRMED FINAL by Jed (2026-09-04, relayed by
+--     hermes) — `owner`/`staff` is the intended final role set, no
+--     further role granularity planned. Originally built as a
+--     placeholder minimal set (no source document had named Elektrica's
 --     roles the way Collision's ADR-001 named "owner/manager/
---     receptionist." The original bot's own open question #5
---     ("Single-user (Jed only) or will other staff need dashboard
---     access/logins in v1?") was never answered. Picking the minimal
---     two-value set (`owner`, `staff`) as a placeholder wide enough to
---     cover "Jed only" (one `owner` row) without assuming any particular
---     additional role names — corrected once Jed answers, per the same
---     discipline Collision's bot used for its own receptionist-permission
---     question (built the safe subset, deferred the real answer, logged
---     it as PENDING rather than guessed).
+--     receptionist"), then confirmed correct as-is rather than corrected
+--     — unlike the document-generator schema placement (migration 009),
+--     which needed an actual fix. Logged as RESOLVED in
+--     docs/OVERNIGHT_DECISIONS.md.
 --
 -- WHAT THIS MIGRATION DELIBERATELY DOES NOT DO (mirrors Collision
 -- migration 004's own explicit scope limit):
 --   - No RLS or route-guard logic scoped by role on elektrica.rental/
 --     vehicle/demand/etc. — no backend exists yet to enforce it against.
---   - No decision about what each role can read/write — that's exactly
---     the open question logged as PENDING below.
+--   - No decision about what each role can read/write — that remains
+--     open (not urgent; no backend to enforce it against yet).
 --   - No provisioning of any real staff_user rows — this is schema only.
 
 CREATE TYPE elektrica.staff_role AS ENUM (

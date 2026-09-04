@@ -485,6 +485,38 @@ it: `id, google_email, role enum, active flag`.
   set actually correct? Low urgency — doesn't block anything else, but
   needed before promoting.
 
+## 2026-09-04 (later) — staff role set confirmed final, migration 011 promoted
+
+Jed confirmed directly (relayed by hermes): `owner`/`staff` is the final
+role set for `elektrica.staff_user`, no further granularity planned.
+Unlike the document-generator placement question, the placeholder guess
+turned out correct — no fix needed, just Jed's sign-off to drop the
+"placeholder" framing and promote.
+
+- Updated `migrations/011_elektrica_staff_user.sql`'s own header comment
+  from "ROLE ENUM VALUES: PLACEHOLDER" to "ROLE ENUM VALUES: CONFIRMED
+  FINAL by Jed," recording the resolution inline in the migration itself,
+  not just in the decisions log.
+- Re-verified per the standing discipline before promoting, not just
+  reused the earlier staging run: reset staging to exactly mirror
+  production's current state (migration 001 only), confirmed migration
+  011 applies standalone (it references only `platform.person`, no
+  dependency on migrations 002-010 — the earlier full-chain apply was
+  for interaction testing against `platform.communication`, not a real
+  dependency), reran `scripts/verify_011.sql` against that
+  production-mirrored state — 6/6 checks passed again.
+- Reset staging clean, then **promoted migration 011 to production**.
+  Confirmed live by direct query: correct 10-column structure, all 15
+  named constraints present (unique/FK/check/not-null), 0 rows (clean,
+  no verification test data leaked in).
+- Marked RESOLVED in `docs/OVERNIGHT_DECISIONS.md`.
+- Tagged `elektrica-migration-011-production`, pushed.
+
+Production `elektrica` schema now has both `renter` (migration 001) and
+`staff_user` (migration 011) live — the two migrations with no
+placeholder fields once Jed's confirmations came in. Everything else
+(002-010) remains staging-only pending real exports or further review.
+
 ## 2026-09-04 (morning, brief note) — accidental push resolved, SQLite track archived
 
 Jed's calls, relayed by hermes: (1) the `elektrica.*` Postgres v2 schema is

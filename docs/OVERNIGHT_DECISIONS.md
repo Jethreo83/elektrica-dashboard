@@ -235,35 +235,32 @@ restoration), not a decision I can make my way out of.
 
 ---
 
-## PENDING (low urgency) — Elektrica staff role set: is `owner`/`staff` sufficient?
+## RESOLVED 2026-09-04 — Elektrica staff role set: `owner`/`staff` confirmed final
 
-**What:** `migrations/011_elektrica_staff_user.sql` adds `elektrica.staff_user`
+**What:** `migrations/011_elektrica_staff_user.sql` added `elektrica.staff_user`
 (needed for the shell launcher's per-business door, per shell-dashboard's
 ADR relayed by hermes), modeled on `vls.staff_user`/`collision.staff_user`.
-The role enum (`owner`, `staff`) is a placeholder minimal set — no source
-document ever answered the original bot's own open question #5 ("will
-other staff need dashboard access, or is it Jed only?").
+The role enum (`owner`, `staff`) was originally a placeholder minimal set —
+no source document had answered the original bot's own open question #5
+("will other staff need dashboard access, or is it Jed only?").
 
-**Why queued instead of guessed further:** Collision's bot hit the exact
-same shape of question (receptionist permission boundaries) and handled
-it the same way I'm handling this: build the safe minimal subset, defer
-the real role/permission answer, log it as PENDING rather than invent
-role names Jed hasn't given. Following that precedent rather than
-picking a fuller role list (e.g. adding "manager" or "driver" or
-whatever) without any evidence for it.
+**Resolution:** Jed confirmed directly (2026-09-04, relayed by hermes):
+`owner`/`staff` is the intended final role set, no further role
+granularity planned. Unlike the document-generator schema placement
+(migration 009), this needed no correction — the placeholder guess turned
+out to be right, just needed Jed's sign-off before dropping the
+"placeholder" framing and promoting.
 
-**What happens if we wait:** the table stays staging-only (not promoted)
-until Jed answers; nothing else in the build depends on this — payments,
-demands, JP litigation, etc. all work regardless of how many staff roles
-Elektrica ends up needing. The shell's Elektrica "door" simply doesn't
-render until this promotes, which is expected and already the status quo
-(hermes's note said this was "not a blocker for anything you're doing
-now, just flagging so it's not a surprise later").
+**What was done:** updated migration 011's own header comment to record
+the confirmation (CONFIRMED FINAL, not PLACEHOLDER). Re-verified against
+a staging branch reset to exactly mirror production's current state
+(migration 001 only), confirmed migration 011 applies standalone (it only
+references `platform.person`, no dependency on migrations 002-010), reran
+`scripts/verify_011.sql` against that state — 6/6 checks passed. Reset
+staging clean again, then promoted migration 011 directly to production.
+Confirmed live: correct 10-column structure, all 15 constraints present,
+0 rows (no test data leaked in from verification).
 
-**What happens if I proceed anyway:** guessing additional role names
-(e.g. from the original plan's mention of a "small internal team") risks
-the same kind of drift as the document-generator schema-placement
-mistake — inventing a shape now that has to be corrected later, when
-waiting costs nothing here.
+**Tagged and pushed** as `elektrica-migration-011-production`.
 
 ---
