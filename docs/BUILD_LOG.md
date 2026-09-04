@@ -346,3 +346,23 @@ vls-dashboard's decision file.
 **Next up:** `insurer_payment` + `adjuster` (still export-blocked) or
 Compliance/lightweight Financials (no export dependency, could go next
 instead).
+
+## 2026-09-04 (morning, brief note) — accidental push resolved, SQLite track archived
+
+Jed's calls, relayed by hermes: (1) the `elektrica.*` Postgres v2 schema is
+the real, approved architecture — confirmed, already built all night; (2)
+on the accidental push of the unreviewed `4a46d40` SQLite-app commit: no
+real damage (no VLS data, no Neon connection from that app, no
+deployment), don't spend more time on it beyond this note, do not
+force-push/rewrite history (already hadn't); (3) archive the SQLite track
+rather than delete it.
+
+Archived to `docs/superseded/phase1-sqlite-app/` (git mv, tracked as
+renames, own README explaining why kept — two real bugs were fixed there
+with regression tests, worth preserving as a record even though the track
+itself is dead). Root README's "two tracks" warning replaced with a short
+resolved note. `.gitignore` retargeted at the new path. Committed and
+pushed (`7fe3949`). Full incident detail already lives in
+`docs/OVERNIGHT_DECISIONS.md`, not duplicated here.
+
+Continuing with the document-generator placement question next.
