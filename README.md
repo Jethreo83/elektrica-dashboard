@@ -110,6 +110,8 @@ build-order discipline as VLS (schema first).
   Staging-only, awaiting Jed's review (new schema, not a drift correction).
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
+Decided-but-not-yet-actionable items (no dependency exists yet to build
+against): `docs/BACKLOG.md`.
 
 ## Deploy process
 

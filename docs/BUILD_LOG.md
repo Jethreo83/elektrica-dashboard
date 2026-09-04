@@ -517,6 +517,26 @@ Production `elektrica` schema now has both `renter` (migration 001) and
 placeholder fields once Jed's confirmations came in. Everything else
 (002-010) remains staging-only pending real exports or further review.
 
+## 2026-09-04 (later still) — staff provisioning must link platform.person (backlogged)
+
+Jed's second decision on staff_user (relayed by hermes): staff
+provisioning should create/link a `platform.person` row the same way
+renter/client provisioning already does — convention #1 consistency,
+same decision relayed to VLS and Collision as a house-wide pattern.
+
+No schema change needed: `elektrica.staff_user.person_id` is already
+`NOT NULL REFERENCES platform.person (id)` (migration 011) — the
+constraint already requires it. What doesn't exist yet is the actual
+provisioning *workflow* (no backend/API exists at all, data layer first
+per standing discipline), so there's no code path today for this
+decision to change anything in. Logged to a new `docs/BACKLOG.md` (items
+decided but not yet actionable, to check when the relevant work starts)
+rather than treating it as an open question needing more from Jed, or
+silently forgetting it until staff-provisioning code is actually
+written. When that day comes: match-before-create through
+`platform_identity_service`, same as renter/client provisioning, no
+shortcut.
+
 ## 2026-09-04 (morning, brief note) — accidental push resolved, SQLite track archived
 
 Jed's calls, relayed by hermes: (1) the `elektrica.*` Postgres v2 schema is
