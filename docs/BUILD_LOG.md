@@ -294,3 +294,55 @@ export dependency and could go next instead). Will check both before
 picking. JP-engine wiring, vehicle enum corrections, and the
 document-generator placement question remain queued in
 `docs/OVERNIGHT_DECISIONS.md` for Jed.
+
+## 2026-09-04 (morning) — JP litigation state machine wired per Jed's decision
+
+Jed answered the queued JP-engine question overnight: option (a), shared/
+cross-schema reuse of `vls.valid_next_states()` — my own recommendation in
+`docs/OVERNIGHT_DECISIONS.md`. Relayed by hermes, also logged in
+vls-dashboard's decision file.
+
+- `migrations/007_elektrica_jp_litigation.sql` — added `vls_case_id`
+  (nullable FK to `vls.case`) on `elektrica.rental`; added a new
+  `in_litigation` rental state between `needs_served` and `resolved`;
+  replaced `elektrica.rental_valid_next_states()`'s temporary
+  `needs_served -> resolved` escape hatch with `needs_served ->
+  in_litigation -> resolved`. Added `elektrica.rental_event_check_litigation()`
+  trigger: blocks `in_litigation` without a linked `vls.case`, and blocks
+  the litigation-exit `resolved` transition unless the linked `vls.case`
+  has reached one of VLS's own terminal states (settled/dismissed/
+  judgment) — read directly off `vls.case.current_state`, never
+  re-derived. Zero new JP-specific transition logic written in the
+  elektrica schema — this is literal reuse, not a fork, exactly per
+  handoff §1.2's instruction and Jed's decision.
+- Granted `elektrica_app` `USAGE` on schema `vls` and `SELECT, INSERT` on
+  `vls.case`/`vls.case_event` (+ sequences) — scoped to what driving
+  Elektrica's own litigation through VLS's engine requires. No visibility
+  into `vls.client` or VLS-client data granted; `platform.person` RLS
+  untouched.
+- `elektrica.blocked_rentals` view updated: the old "JP handoff not wired"
+  entry is gone (problem solved), replaced with real visibility — a
+  rental in `needs_served` with no case linked yet, or `in_litigation`
+  while its linked `vls.case` is itself stalled (reusing
+  `vls.blocked_cases`' own JP-trap detection rather than re-deriving it).
+- Verified with `scripts/verify_007.sql` — 6 checks, all passed. The
+  load-bearing one (CHECK 4a) proves real reuse, not a stub: a `vls.case`
+  created and driven entirely from Elektrica's schema still has VLS's own
+  JP discovery trap fire correctly (a direct `answered -> discovery_open`
+  jump is rejected, exactly as it would be for a genuine VLS case) — the
+  logic Elektrica is relying on is provably the same logic VLS itself
+  runs, not a copy that could silently drift.
+- Marked RESOLVED in `docs/OVERNIGHT_DECISIONS.md`, with the full
+  before/after and verification summary preserved there for the record.
+- **Still staging-only** — inherits `elektrica.rental`'s staging-only
+  status mechanically via its placeholder vehicle/rental fields, not
+  because of anything new introduced by this migration. This piece has no
+  placeholder fields of its own and is promotion-ready once its
+  dependencies (the real Fleet/Rental-Management exports) land.
+- Two remaining queued items in `docs/OVERNIGHT_DECISIONS.md`: document-
+  generator schema placement (`elektrica` vs `platform`) and the still-
+  blocked real Sheet exports.
+
+**Next up:** `insurer_payment` + `adjuster` (still export-blocked) or
+Compliance/lightweight Financials (no export dependency, could go next
+instead).

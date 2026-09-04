@@ -135,6 +135,16 @@ build-order discipline as VLS (schema first).
   insurance_carrier/adjuster tables yet). `comparable_set` is immutable
   from creation. `aging_demands` view implements the "45 days with no
   offer" aging signal. Staging-only.
+- **JP litigation wiring** (`migrations/007_elektrica_jp_litigation.sql`)
+  — `elektrica.rental.vls_case_id` (FK to `vls.case`) + a new
+  `in_litigation` state, per Jed's decision to reuse
+  `vls.valid_next_states()` directly rather than fork it (resolves
+  ADR-001 v2 §7 item 5). Zero new JP transition logic in the elektrica
+  schema — Elektrica's litigation is driven entirely through `vls.case`/
+  `vls.case_event`. Verified the real VLS JP discovery trap fires
+  correctly on a case created from Elektrica's own schema. Still
+  staging-only (inherited from `elektrica.rental`), but this piece itself
+  has no placeholder fields.
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 

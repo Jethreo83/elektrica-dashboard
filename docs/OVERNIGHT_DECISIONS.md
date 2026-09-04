@@ -13,7 +13,7 @@ wait vs. proceed, my recommendation if I have one.
 
 ---
 
-## BLOCKER — JP litigation state machine wiring (ADR-001 v2 §7 item 5)
+## BLOCKER — JP litigation state machine wiring (ADR-001 v2 §7 item 5) — RESOLVED, see below
 
 **What:** `elektrica.rental`'s state machine (migration 003) stops at
 `needs_served` with a TODO instead of continuing into the JP litigation
@@ -82,6 +82,47 @@ so relocation is a rename + grant change, not a redesign.
 `platform.*` now would preemptively couple VLS to a schema shape neither
 VLS nor Jed has reviewed, for a feature VLS hasn't asked for yet — higher
 risk than waiting, not lower.
+
+---
+
+## RESOLVED 2026-09-04 — JP litigation state machine wiring (was ADR-001 v2 §7 item 5)
+
+**Decision (Jed, via hermes):** option (a) — shared/cross-schema reuse of
+`vls.valid_next_states()`, matching my recommendation below. Implemented
+in `migrations/007_elektrica_jp_litigation.sql`.
+
+**What was built:** `elektrica.rental` gained a nullable `vls_case_id` FK
+to `vls.case`. A new `in_litigation` state sits between `needs_served` and
+`resolved`. Elektrica's litigation is driven entirely through `vls.case` +
+`vls.case_event` using VLS migration 002's existing, already-verified
+`valid_next_states()`/trigger logic (including the JP discovery trap) —
+zero new JP-specific transition rules defined in the elektrica schema.
+`resolved` is gated on the linked `vls.case.current_state` having reached
+one of VLS's own terminal states (settled/dismissed/judgment), checked by
+a new trigger that only reads `vls.case`, never re-derives its logic.
+
+**Verified with `scripts/verify_007.sql`** (6 checks): `in_litigation`
+blocked without a linked `vls.case`; succeeds once one exists; `resolved`
+blocked while the linked case is non-terminal; the linked `vls.case`
+walked through VLS's real JP branch (filed -> served -> answered ->
+[discovery trap fires correctly, rejecting a direct jump to
+discovery_open] -> motion_limited_discovery_filed -> discovery_open ->
+settled) using nothing but `vls.case_event` inserts — proving this is real
+reuse of VLS's proven logic, not a reimplementation; `resolved` then
+succeeds; and the old temporary `needs_served -> resolved` escape hatch
+from migration 003 is confirmed closed.
+
+**Grants added:** `elektrica_app` now has `USAGE` on schema `vls` and
+`SELECT, INSERT` on `vls.case` / `vls.case_event` (plus their sequences)
+— scoped narrowly to what driving Elektrica's own litigation through
+VLS's engine requires. Nothing here grants elektrica_app visibility into
+`vls.client` or any VLS-client-specific data; RLS on `platform.person` is
+untouched.
+
+**Still staging-only:** inherits `elektrica.rental`'s staging-only status
+mechanically (placeholder vehicle/rental fields, pending real exports) —
+the JP-wiring piece itself has no placeholder fields and would be
+promotion-ready on its own once its dependencies are.
 
 ---
 
