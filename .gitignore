@@ -5,3 +5,13 @@
 node_modules/
 dist/
 data/snapshots/
+
+# Phase 1 Python app (added when scaffolding app/ -- see LOG.md)
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+data/*.db
+data/*.db-journal
+.venv/
+venv/

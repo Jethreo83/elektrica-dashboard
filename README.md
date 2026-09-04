@@ -5,6 +5,81 @@ LLC) — the third product on the same shared platform as VLS Dashboard.
 See `docs/ADR-001-elektrica-rentals-v2.md` (approved by Jed, 2026-09-03) for
 scope, architecture, and data model.
 
+## IMPORTANT: two parallel tracks exist in this repo right now
+
+This repo currently holds **two different, not-yet-reconciled build
+tracks** for Elektrica. Read this section before touching either one.
+
+1. **`elektrica.*` Postgres schema** (migrations/001-006, this README's
+   original content below) — built against `docs/ADR-001-elektrica-rentals-v2.md`
+   ("v2"), the larger claim-generation-machine scope reconciled with VLS's
+   handoff doc. Lives on the shared Neon project `aged-art-92489373`.
+   Migration 001 is promoted to production; 002-006 are staging-only.
+   No application code was ever built against this schema.
+
+2. **`app/` FastAPI + SQLite Phase 1 scaffold** (added the session Jed said
+   "ADR-001 plan is approved, begin Phase 1 implementation" and named
+   entities Vehicle/Customer/Lease/Payment/Incident/ComplianceItem) — built
+   against the **original**, smaller-scope `docs/original-bot-plan.md`
+   draft, not the v2 document. Fully local, SQLite-backed, no Postgres/Neon
+   connection at all. See `app/` section below.
+
+**Open question for Jed (flagged, not resolved unilaterally):** these two
+tracks model overlapping concepts (Vehicle vs. `elektrica.vehicle`,
+Lease/Customer vs. `elektrica.rental`/`elektrica.renter`) with incompatible
+primary-key conventions (integer autoincrement vs. UUID-keyed to
+`platform.person`) and no data compatibility between them. Jed's Phase 1
+instruction named the original doc's simpler entities verbatim, so that's
+what got built — but this needs a real reconciliation decision (migrate one
+into the other? keep both — one for internal ops, one for the claim
+machine? drop one?) before either track goes much further. Logged in
+`workspace/LOG.md` in the bot's Hermes profile as an open question.
+
+## Phase 1 app (`app/`) — local FastAPI + SQLite CRUD API
+
+Status: **built and tested this session.** Local-only, no auth, no
+deployment, no external exposure — per standing rule, nothing here has been
+pushed anywhere externally beyond this git repo (and this repo itself
+hasn't been pushed since Phase 1 started; see LOG.md for exact commit/push
+status at hand-off).
+
+Entities implemented (matching `docs/original-bot-plan.md` section 4):
+Vehicle, Customer, Lease, Payment, Incident, ComplianceItem. Full CRUD
+(create/list/get/patch/delete) for each, plus:
+- FK validation on create/update (e.g. a Lease's `vehicle_id`/`customer_id`
+  must exist) — returns 422, not a DB-level crash.
+- FK-dependency guards on delete (e.g. can't delete a Vehicle that still
+  has Leases pointing at it) — returns 409 with an explanation, not a bare
+  500. (This was a real bug caught during manual testing this session —
+  see LOG.md.)
+- `GET /summary` — at-a-glance fleet/lease/payment/incident/compliance
+  counts, matching the original plan's "Reporting / home view" item.
+- `GET /health` — liveness check.
+- Auto-generated interactive API docs at `/docs` (FastAPI/Swagger UI).
+
+Run locally:
+```bash
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8420
+```
+Then visit `http://127.0.0.1:8420/docs`. Data persists to
+`data/elektrica.db` (gitignored, created automatically on first run).
+
+Run the test suite (11 tests, all passing as of this session — includes
+regression tests for the delete-dependency bug above):
+```bash
+python -m pytest tests/ -v
+```
+
+Not yet built for this track: any frontend/UI (API only so far), auth
+(single-user local tool, fine for now but flagged), Alembic/migration
+tooling (schema changes currently require recreating the SQLite file — see
+`app/database.py` docstring), soft-delete/audit history.
+
+---
+
+## `elektrica.*` Postgres schema track (original README content, v2 ADR)
+
 ## Status (as of migration 001, tag `elektrica-migration-001`)
 
 **No application/API/frontend exists yet** — data layer only, same
