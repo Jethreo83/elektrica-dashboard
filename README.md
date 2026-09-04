@@ -33,9 +33,16 @@ build-order discipline as VLS (schema first).
   `vls.case`/`vls.case_event`. Covers only Elektrica's own lifecycle portion
   (`active` through `needs_served`); deliberately does not wire the JP
   litigation state machine onto `needs_served` — that's an open
-  architecture question (ADR-001 v2 §7 item 5). `body_shop`/`rental_type`
-  are placeholder-shape free text pending the real Rental Management sheet
+  architecture question (ADR-001 v2 §7 item 5, queued in
+  `docs/OVERNIGHT_DECISIONS.md`). `body_shop`/`rental_type` are
+  placeholder-shape free text pending the real Rental Management sheet
   export. Staging-only.
+- **`elektrica.rental_proposal`** (`migrations/004_elektrica_rental_proposal.sql`)
+  — bot API contract stub (handoff §1.7). No placeholder fields — shape
+  taken directly from the handoff spec. Immutable except a one-time
+  pending -> accepted/rejected decision; accepting a proposal never
+  auto-writes `elektrica.rental`, by design. Inherits staging-only status
+  mechanically via its FK to `elektrica.rental`.
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 
@@ -73,7 +80,6 @@ JP-only litigation branch, not forked.
 
 ## Not yet built
 
-- `rental_proposal` + bot API stub
 - `demand`, `comparable_set`, shared document generator (rental demand
   letters as first real caller)
 - `outbound_log`, `communication` timeline

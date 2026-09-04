@@ -143,3 +143,56 @@ Work done, staging-only:
 proposal-shaped only, no legal-record field ever auto-written. Then
 `demand` + `comparable_set` once the document generator shape is at least
 stubbed.
+
+## 2026-09-03/04 (overnight, continued) — full overnight rules received; rental_proposal shipped
+
+hermes resent the overnight rules a third time, complete this time (prior
+two were genuinely truncated in transit, not a signal to ignore). Summary:
+Jed unreachable until morning; keep building; anything needing his direct
+sign-off (money, external sends under his name, deleting data, prod
+credentials, touching another business's schema without clearance) gets
+queued to `docs/OVERNIGHT_DECISIONS.md` instead of decided solo; genuine
+blockers get logged there too and I move to the next build-order item
+rather than idling; normal git discipline (commit/tag/push per milestone)
+continues.
+
+Created `docs/OVERNIGHT_DECISIONS.md` with two entries: the open JP-engine
+wiring question (ADR §7 item 5 — queued, not decided, since it's an
+architecture choice touching how Elektrica's schema relates to VLS's) and
+the still-unresolved real Sheet exports (external dependency, not a
+decision).
+
+Then continued the build order:
+
+- `migrations/004_elektrica_rental_proposal.sql` — bot API contract stub
+  per handoff §1.7/§2.3. `rental_proposal` table: kind (departure/return/
+  dates/tolls), free-shape JSONB `proposed_values` (deliberately not typed
+  per-kind — the bot side doesn't exist yet, locking columns now would be
+  guessing), source_system + evidence + observed_at provenance, pending/
+  accepted/rejected status with a check constraint tying decided_by/
+  decided_at to non-pending status. No placeholder fields — shape comes
+  directly from the handoff's literal spec, not a guessed Sheet column.
+  Immutable except for the one-time decision (mirrors
+  elektrica.rental_event's restrict-update pattern); append-only
+  (DELETE blocked). Critically: accepting/rejecting a proposal here does
+  **not** touch `elektrica.rental.current_state` — per handoff §1.7 ("never
+  auto-applied to a legal-record field"), a human or future app-layer
+  action must separately insert the corresponding `rental_event`.
+- Note: staging branch lost `vehicle`/`rental` between sessions (shared
+  Neon project with VLS work happening in parallel overnight) — had to
+  reapply 002/003 before 004 would apply cleanly. No data loss of concern
+  (test harness rows only, staging is disposable by design).
+- Verified with `scripts/verify_004.sql` — 8 checks, all passed. CHECK 8 is
+  the load-bearing one: confirms `elektrica.rental.current_state` stayed
+  `active` after a proposal was accepted, proving proposals really are
+  inert until a human/app separately acts on them.
+- Migration 004 inherits migration 003's staging-only status mechanically
+  (FK chain through `elektrica.rental` -> `elektrica.vehicle`'s placeholder
+  enums), not because of anything wrong with its own shape — noted in the
+  migration file itself.
+
+**Next up:** `document` + shared document generator stub (handoff §1.3),
+scoped first to rental demand letters per ADR-001 v2 section 4's
+instruction to build it now. Then `demand`/`comparable_set`. JP-engine
+wiring and the vehicle enum corrections remain queued in
+`docs/OVERNIGHT_DECISIONS.md` for Jed.
