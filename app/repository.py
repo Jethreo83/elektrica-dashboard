@@ -637,6 +637,33 @@ def provision_staff_user_for_existing_person(
     return _staff_user_from_row(cur.fetchone())
 
 
+def set_staff_user_active(cur, google_email: str, active: bool, actor: str) -> StaffUser:
+    """Flip a staff member's active flag. *** REQUIRES A PRIVILEGED
+    CONNECTION *** -- same caveat as provision_staff_user_for_existing_person()
+    (elektrica_app has SELECT-only on staff_user, migration 011). Mirrors
+    Collision's set_staff_user_active() (same repo family, same
+    conventions) -- Elektrica has no staff_user_capability() function
+    (unlike Collision, whose owner/manager/receptionist role set needed
+    graduated permissions; Elektrica's role set is CONFIRMED FINAL as a
+    flat owner/staff split with no further granularity per Jed, migration
+    011's own header), so there is no capability-lookup counterpart to
+    build here -- active/inactive plus the role enum is the whole
+    permission surface for this business, not a gap."""
+    cur.execute(
+        """
+        UPDATE elektrica.staff_user
+        SET active = %s, updated_at = now(), updated_by = %s
+        WHERE google_email = %s
+        RETURNING *
+        """,
+        (active, actor, google_email.strip().lower()),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"No staff_user with google_email={google_email!r}")
+    return _staff_user_from_row(row)
+
+
 def _staff_user_from_row(row) -> StaffUser:
     return StaffUser(
         id=row["id"], person_id=row["person_id"], role=StaffRole(row["role"]),

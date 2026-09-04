@@ -18,8 +18,8 @@ from app.api import app, get_cursor
 from app.models import (
     Demand, DemandRecipientType, DemandType, Payment, PaymentSource,
     ProposalKind, ProposalStatus, Rental, RentalBilledTo, RentalEvent,
-    RentalProposal, RentalState, EventSource, Toll, Vehicle, VehicleClass,
-    VehicleStatus,
+    RentalProposal, RentalState, EventSource, StaffRole, StaffUser, Toll,
+    Vehicle, VehicleClass, VehicleStatus,
 )
 
 FAILED = []
@@ -89,6 +89,15 @@ def _sample_payment(**overrides) -> Payment:
     defaults = dict(id=1, rental_id=1, source=PaymentSource.MANUAL, amount=Decimal("450.00"))
     defaults.update(overrides)
     return Payment(**defaults)
+
+
+def _sample_staff(**overrides) -> StaffUser:
+    defaults = dict(
+        id=1, person_id=10, role=StaffRole.STAFF,
+        google_email="hire@elektricarentals.com", active=True,
+    )
+    defaults.update(overrides)
+    return StaffUser(**defaults)
 
 
 def test_health():
@@ -309,6 +318,63 @@ def test_compliance_expiring_soon():
     check("test_compliance_expiring_soon", r.status_code == 200 and len(r.json()) == 1)
 
 
+def test_provision_staff():
+    with patch("app.api.repo.provision_staff_user_for_existing_person", return_value=_sample_staff()):
+        r = client.post(
+            "/staff",
+            json={"person_id": 10, "role": "staff", "google_email": "hire@elektricarentals.com", "actor": "jed"},
+        )
+    check("test_provision_staff_status", r.status_code == 200, r.text)
+    check("test_provision_staff_body", r.json()["role"] == "staff")
+
+
+def test_provision_staff_bad_role_returns_400():
+    r = client.post(
+        "/staff",
+        json={"person_id": 10, "role": "not_a_role", "google_email": "hire@elektricarentals.com", "actor": "jed"},
+    )
+    check("test_provision_staff_bad_role_returns_400", r.status_code == 400, r.text)
+
+
+def test_provision_staff_domain_rejection_returns_400():
+    """StaffUser.__post_init__'s domain CHECK mirror (migrations/011)
+    raises ValueError inside the repository call -- must surface as 400,
+    not 500."""
+    with patch(
+        "app.api.repo.provision_staff_user_for_existing_person",
+        side_effect=ValueError("google_email must end in '@elektricarentals.com'"),
+    ):
+        r = client.post(
+            "/staff",
+            json={"person_id": 10, "role": "staff", "google_email": "hire@gmail.com", "actor": "jed"},
+        )
+    check("test_provision_staff_domain_rejection_returns_400", r.status_code == 400, r.text)
+
+
+def test_get_staff_found():
+    with patch("app.api.repo.get_staff_user_by_google_email", return_value=_sample_staff()):
+        r = client.get("/staff/hire@elektricarentals.com")
+    check("test_get_staff_found", r.status_code == 200 and r.json()["google_email"] == "hire@elektricarentals.com")
+
+
+def test_get_staff_not_found():
+    with patch("app.api.repo.get_staff_user_by_google_email", return_value=None):
+        r = client.get("/staff/nobody@elektricarentals.com")
+    check("test_get_staff_not_found", r.status_code == 404)
+
+
+def test_set_staff_active_deactivate():
+    with patch("app.api.repo.set_staff_user_active", return_value=_sample_staff(active=False)):
+        r = client.post("/staff/hire@elektricarentals.com/active", json={"active": False, "actor": "jed"})
+    check("test_set_staff_active_deactivate", r.status_code == 200 and r.json()["active"] is False)
+
+
+def test_set_staff_active_not_found():
+    with patch("app.api.repo.set_staff_user_active", side_effect=ValueError("No staff_user with google_email=...")):
+        r = client.post("/staff/nobody@elektricarentals.com/active", json={"active": False, "actor": "jed"})
+    check("test_set_staff_active_not_found", r.status_code == 404)
+
+
 if __name__ == "__main__":
     tests = [
         test_health, test_fleet_out, test_create_rental, test_create_rental_bad_billed_to,
@@ -325,6 +391,10 @@ if __name__ == "__main__":
         test_create_payment, test_create_payment_authorize_net_without_txn_id_returns_400,
         test_create_payment_zero_amount_returns_400,
         test_vehicle_revenue_summary, test_compliance_expiring_soon,
+        test_provision_staff, test_provision_staff_bad_role_returns_400,
+        test_provision_staff_domain_rejection_returns_400,
+        test_get_staff_found, test_get_staff_not_found,
+        test_set_staff_active_deactivate, test_set_staff_active_not_found,
     ]
     for t in tests:
         t()

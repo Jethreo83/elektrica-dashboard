@@ -63,6 +63,7 @@ from app.models import (
     RentalBilledTo,
     RentalProposal,
     RentalState,
+    StaffRole,
     Toll,
     Vehicle,
     VehicleClass,
@@ -224,6 +225,38 @@ class PaymentOut(BaseModel):
     amount: Decimal
 
 
+class StaffUserOut(BaseModel):
+    id: int
+    person_id: int
+    role: str
+    google_email: str
+    active: bool
+    provisioned_by_staff_user_id: Optional[int] = None
+
+
+class StaffProvisionRequest(BaseModel):
+    """Provisions a staff_user for an ALREADY-EXISTING platform.person.
+    Matches app.repository.provision_staff_user_for_existing_person()'s
+    scope exactly (same repo family, same convention as Complete
+    Collision's own StaffProvisionRequest) -- deliberately does NOT
+    create a new platform.person row, since that requires a privileged
+    (non-elektrica_app) DB connection per app/db.py's documented role
+    gap. Creating new person rows stays an admin-script operation until
+    an identity-service integration exists (see docs/BACKLOG.md --
+    platform.match_or_create_person() is the real mechanism once this
+    route needs to grow that far)."""
+    person_id: int
+    role: str
+    google_email: str
+    actor: str
+    provisioned_by_staff_user_id: Optional[int] = None
+
+
+class StaffActiveRequest(BaseModel):
+    active: bool
+    actor: str
+
+
 def _vehicle_to_out(v: Vehicle) -> VehicleOut:
     return VehicleOut(
         id=v.id, vin=v.vin,
@@ -271,6 +304,14 @@ def _payment_to_out(p: Payment) -> PaymentOut:
     return PaymentOut(
         id=p.id, rental_id=p.rental_id, demand_id=p.demand_id,
         source=p.source.value, amount=p.amount,
+    )
+
+
+def _staff_to_out(s) -> StaffUserOut:
+    return StaffUserOut(
+        id=s.id, person_id=s.person_id, role=s.role.value,
+        google_email=s.google_email, active=s.active,
+        provisioned_by_staff_user_id=s.provisioned_by_staff_user_id,
     )
 
 
@@ -510,3 +551,57 @@ def get_vehicle_revenue_summary(cur=Depends(get_cursor)):
 @app.get("/compliance/expiring-soon")
 def get_compliance_expiring_soon(cur=Depends(get_cursor)):
     return repo.list_compliance_items_expiring_soon(cur)
+
+
+# --- Staff (staff-provisioning workflow -- closes the BACKLOG.md gap: -----
+# repository functions existed since the first app-layer cycle
+# (provision_staff_user_for_existing_person, get_staff_user_by_google_email)
+# but had no HTTP route; set_staff_user_active() added alongside these
+# routes this cycle. Same "requires a privileged connection" caveat as
+# Complete Collision's identical route family (elektrica_app has
+# SELECT-only on staff_user per migration 011) -- these routes will 500
+# under elektrica_app until called through a privileged connection or a
+# real identity-service/admin-role boundary exists; not silently worked
+# around here, same as app/db.py's own documented role gap.
+#
+# Deliberately does NOT expose a route that creates a brand-new
+# platform.person -- per docs/BACKLOG.md, staff provisioning must go
+# through platform.match_or_create_person() (via platform_identity_service)
+# for identity resolution, not a bespoke INSERT in this app. This route
+# only links an ALREADY-RESOLVED person_id, matching
+# provision_staff_user_for_existing_person()'s own scope. -----------------
+
+@app.post("/staff", response_model=StaffUserOut)
+def provision_staff(body: StaffProvisionRequest, cur=Depends(get_cursor)):
+    try:
+        role = StaffRole(body.role)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"role={body.role!r} must be one of {[r.value for r in StaffRole]}",
+        )
+    try:
+        staff = repo.provision_staff_user_for_existing_person(
+            cur, body.person_id, role, body.google_email, body.actor,
+            provisioned_by_staff_user_id=body.provisioned_by_staff_user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _staff_to_out(staff)
+
+
+@app.get("/staff/{google_email}", response_model=StaffUserOut)
+def get_staff(google_email: str, cur=Depends(get_cursor)):
+    staff = repo.get_staff_user_by_google_email(cur, google_email)
+    if staff is None:
+        raise HTTPException(status_code=404, detail=f"No staff_user with google_email={google_email!r}")
+    return _staff_to_out(staff)
+
+
+@app.post("/staff/{google_email}/active", response_model=StaffUserOut)
+def set_staff_active(google_email: str, body: StaffActiveRequest, cur=Depends(get_cursor)):
+    try:
+        staff = repo.set_staff_user_active(cur, google_email, body.active, body.actor)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _staff_to_out(staff)

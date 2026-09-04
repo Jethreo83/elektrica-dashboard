@@ -780,3 +780,91 @@ migration's verify_NNN.sql, applied to app code for the first time):**
   but has no HTTP route yet, same "exists at the repository layer,
   no route wired" state Collision's own staff provisioning was in when
   it was first built.
+
+---
+
+## 2026-09-04 (continuous cron cycle) — staging reapply verification + staff-provisioning route gap closed
+
+**Starting point:** pulled 1 new commit from a concurrent session
+(`f1e5680`, docs-only — confirmed `platform.match_or_create_person()` is
+real and BACKLOG.md's staff-provisioning entry was already consistent
+with it, no code change needed). Staging Neon branch had drifted back to
+only `elektrica.renter`/`staff_user` (the two production-promoted
+tables) — same recurring shared-branch churn prior cycles have hit.
+Reapplied migrations 002-010 via `neon connection-string staging ...
+--psql -- -f migrations/00N_*.sql` under `neondb_owner`; all ten applied
+clean with no errors, confirmed via `\dt elektrica.*` / `\dt platform.*`
+(11 elektrica tables, 7 platform tables, matching the full documented
+chain). No schema changes made — this was drift-repair, not new build.
+
+**Verified the existing app layer still holds after the reapply** (same
+verification standard as every prior cycle, now run again from a cold
+staging state to prove it isn't accidentally coupled to leftover rows
+from an earlier session):
+- `python test_models.py` — 20/20 (unchanged).
+- `python test_api.py` — 29/29 before this cycle's new tests, 36/36 after
+  (see below).
+- `python scripts/_smoke_repository.py ELEKTRICA_STAGING_URL` (run under
+  `neondb_owner`, since `elektrica_app`'s Neon-managed password isn't
+  retrievable via the CLI's `reveal_password` API for a `NOLOGIN` role —
+  confirmed by inspection, not assumed; the smoke script doesn't `SET
+  ROLE` on its own, so this run exercises the same SQL under a
+  differently-privileged connection than a real `elektrica_app` deploy
+  would use, a real difference worth noting for whoever wires the actual
+  connection string, not a false pass) — full happy path (renter, vehicle,
+  rental, all three lifecycle transitions including the
+  `advance_rental_state` illegal-skip rejection, bot proposal + accept
+  decision with the "does not mutate `rental.current_state`" assertion,
+  demand + toll + payment, the append-only payment DELETE-rejection
+  probe) — all passed against real staging Postgres, same residue-left
+  discipline as prior cycles (`SMOKETESTVIN00042`, ids under
+  `smoke_test`/`bot_smoke`).
+
+**Built:** closed the staff-provisioning HTTP-route gap flagged in this
+file's own "not done" list above and in `docs/BACKLOG.md` (full detail
+there, not duplicated here):
+- `app/repository.py`: `set_staff_user_active()` (new function).
+- `app/api.py`: `POST /staff`, `GET /staff/{google_email}`,
+  `POST /staff/{google_email}/active` — same shape as Complete
+  Collision's identical route family, same "no `platform.person`-creating
+  route, requires a privileged non-`elektrica_app` connection, no
+  auth/session layer yet" caveats stated explicitly in the new code's own
+  comments rather than silently assumed.
+- `test_api.py`: 6 new mocked cases (provision success, bad role enum,
+  wrong-domain rejection surfacing as 400 not 500, get found/not-found,
+  deactivate, deactivate-not-found) — 36/36 total.
+- **Live-verified against real staging**, not just mocks: ran `uvicorn
+  app.api:app` under a `neondb_owner` connection (the privileged
+  connection these routes require per their own documented role gap),
+  inserted a real `platform.person` row, then via real `curl` calls:
+  `POST /staff` (200, provisioned `smoke.staff@elektricarentals.com` as
+  `staff`), `GET /staff/{email}` (200, round-tripped correctly),
+  `POST /staff/{email}/active` with `active: false` (200, deactivation
+  took), `GET /staff/nobody@elektricarentals.com` (404), `POST /staff`
+  with `role: "manager"` (400, not a valid Elektrica role), `POST /staff`
+  with a `@gmail.com` address (400 — confirmed the domain-CHECK
+  `ValueError` from `StaffUser.__post_init__` surfaces as a client error,
+  not a 500, matching the discipline every other route in this file
+  already follows). Server process confirmed killed afterward via the
+  process manager's own kill confirmation (not just the command's exit
+  code). No deploy, no external exposure.
+
+**Committed & pushed** to `origin/main`.
+
+**Not done / explicitly deferred, not silently skipped (updated):**
+- No auth layer on any route (bot proposals, now also staff
+  provisioning) — same standing flag, unchanged.
+- `insurer_payment`/`adjuster` app-layer code — still schema-blocked on
+  the real historical export (unchanged blocker, no ETA).
+- Frontend — not started, deliberately last per ADR-001 v2.
+- `elektrica_app`'s actual Neon-managed password was never resolved this
+  cycle (the CLI's `reveal_password` API returns an empty string for
+  `NOLOGIN` roles, which is expected — `NOLOGIN` roles have no password
+  to reveal, they're meant to be reached via `SET ROLE` from a login
+  role, not connected to directly). Nobody has actually run this app
+  layer end-to-end under a literal `elektrica_app` psycopg2 connection
+  string yet (every smoke/live run so far, this cycle and prior ones,
+  has used `neondb_owner`) — worth a future cycle explicitly proving the
+  `SET ROLE elektrica_app` path works through `app/db.py`, since that's
+  the actual production access pattern the schema's own grants assume,
+  not just its close cousin.

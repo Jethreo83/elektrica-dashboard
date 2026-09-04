@@ -83,3 +83,47 @@ their own docstrings pointing back to this file. Identity resolution
 whatever calls these functions — correctly not baked into either one.
 Nothing to fix; just noting the pattern held before this entry was even
 fully written.
+
+---
+
+## RESOLVED 2026-09-04 (cron cycle) — Staff-provisioning HTTP route gap closed
+
+**What:** the staff-provisioning backlog item above (and BUILD_LOG.md's
+"not done / explicitly deferred" list from the previous cycle) both
+flagged that `provision_staff_user_for_existing_person()` /
+`get_staff_user_by_google_email()` existed in `app/repository.py` but had
+no HTTP route. Closed this cycle, mirroring Complete Collision's
+identical route family exactly (same repo convention):
+
+- `app/repository.py`: added `set_staff_user_active()` (the third
+  function Collision's equivalent route family needed; Elektrica had no
+  counterpart until now). No `get_staff_capability()` equivalent added —
+  Elektrica's role set is a flat `owner`/`staff` split, CONFIRMED FINAL
+  by Jed with no further granularity (migration 011), so there is no
+  capability-lookup function to expose; this is a real scope difference
+  from Collision, not a gap.
+- `app/api.py`: `POST /staff`, `GET /staff/{google_email}`,
+  `POST /staff/{google_email}/active`. Deliberately does NOT expose a
+  route that creates a new `platform.person` row — per this file's own
+  entries above, that must go through `platform.match_or_create_person()`
+  via `platform_identity_service`, not a bespoke INSERT here.
+- Tests: 6 new mocked `test_api.py` cases (36/36 total now), including a
+  domain-rejection case confirming `StaffUser.__post_init__`'s ValueError
+  surfaces as 400, not 500.
+- Live-verified against real staging (`neondb_owner` connection, per the
+  documented `elektrica_app` SELECT-only role gap on `staff_user`): ran
+  uvicorn, provisioned a real staff_user (person_id=11,
+  `smoke.staff@elektricarentals.com`), read it back, deactivated it,
+  confirmed a 404 for an unknown email, a 400 for a bad role enum value,
+  and a 400 (not 500) for a wrong-domain email. Process killed after.
+  Staging residue left intentionally (same append-only-adjacent
+  reasoning as every other smoke run in this repo): `staff_user` id=1,
+  `platform.person` id=11.
+
+**Still open, not touched this cycle:** the route family has no
+auth/session layer (same standing gap as every other route in
+`app/api.py`, flagged in that file's own module docstring) — provisioning
+a real staff member through this route today requires the same
+privileged, non-`elektrica_app` connection every other admin-only
+function in this repo needs, and that gate is a human-operated deploy
+decision, not something this cycle resolves.
