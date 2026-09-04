@@ -12,6 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import patch
 
+import psycopg2.errors
 from fastapi.testclient import TestClient
 
 from app.api import app, get_cursor
@@ -351,6 +352,23 @@ def test_provision_staff_domain_rejection_returns_400():
     check("test_provision_staff_domain_rejection_returns_400", r.status_code == 400, r.text)
 
 
+def test_provision_staff_insufficient_privilege_returns_403():
+    """Real, live-reproduced gap (2026-09-04 cron cycle, run under
+    ELEKTRICA_DB_SET_ROLE=elektrica_app via curl): elektrica_app has
+    SELECT-only on staff_user (migration 011) so this route 500'd until
+    this except-clause was added. Confirms it now surfaces as a clean
+    403, not a bare framework 500."""
+    with patch(
+        "app.api.repo.provision_staff_user_for_existing_person",
+        side_effect=psycopg2.errors.InsufficientPrivilege("permission denied for table staff_user"),
+    ):
+        r = client.post(
+            "/staff",
+            json={"person_id": 10, "role": "staff", "google_email": "hire@elektricarentals.com", "actor": "jed"},
+        )
+    check("test_provision_staff_insufficient_privilege_returns_403", r.status_code == 403, r.text)
+
+
 def test_get_staff_found():
     with patch("app.api.repo.get_staff_user_by_google_email", return_value=_sample_staff()):
         r = client.get("/staff/hire@elektricarentals.com")
@@ -375,6 +393,17 @@ def test_set_staff_active_not_found():
     check("test_set_staff_active_not_found", r.status_code == 404)
 
 
+def test_set_staff_active_insufficient_privilege_returns_403():
+    """Same real, live-reproduced gap as test_provision_staff_insufficient_privilege_returns_403
+    above, for the sibling route."""
+    with patch(
+        "app.api.repo.set_staff_user_active",
+        side_effect=psycopg2.errors.InsufficientPrivilege("permission denied for table staff_user"),
+    ):
+        r = client.post("/staff/hire@elektricarentals.com/active", json={"active": False, "actor": "jed"})
+    check("test_set_staff_active_insufficient_privilege_returns_403", r.status_code == 403, r.text)
+
+
 if __name__ == "__main__":
     tests = [
         test_health, test_fleet_out, test_create_rental, test_create_rental_bad_billed_to,
@@ -393,8 +422,10 @@ if __name__ == "__main__":
         test_vehicle_revenue_summary, test_compliance_expiring_soon,
         test_provision_staff, test_provision_staff_bad_role_returns_400,
         test_provision_staff_domain_rejection_returns_400,
+        test_provision_staff_insufficient_privilege_returns_403,
         test_get_staff_found, test_get_staff_not_found,
         test_set_staff_active_deactivate, test_set_staff_active_not_found,
+        test_set_staff_active_insufficient_privilege_returns_403,
     ]
     for t in tests:
         t()

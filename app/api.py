@@ -45,6 +45,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
+import psycopg2.errors
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -80,11 +81,23 @@ def get_db_env_var() -> str:
     return os.environ.get("ELEKTRICA_DB_ENV_VAR", "DATABASE_URL")
 
 
+def get_db_set_role() -> "str | None":
+    """Optional `SET ROLE` target for the app's DB connection, e.g.
+    "elektrica_app" -- see app/db.py's get_connection() docstring and
+    scripts/_smoke_elektrica_app_role.py for why this exists: the real
+    production access pattern is a neondb_owner-class login connection
+    string that then SET ROLEs to elektrica_app (elektrica_app itself is
+    NOLOGIN), not a plain neondb_owner connection with no role switch.
+    Unset by default so existing deploys/tests are unaffected until this
+    is explicitly turned on."""
+    return os.environ.get("ELEKTRICA_DB_SET_ROLE") or None
+
+
 def get_cursor():
     """FastAPI dependency yielding a transactional cursor. Overridden in
     tests so no test run ever needs a real database connection."""
     env_var = get_db_env_var()
-    with db.cursor(env_var) as cur:
+    with db.cursor(env_var, set_role=get_db_set_role()) as cur:
         yield cur
 
 
@@ -587,6 +600,20 @@ def provision_staff(body: StaffProvisionRequest, cur=Depends(get_cursor)):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except psycopg2.errors.InsufficientPrivilege:
+        # Real, expected outcome under the documented elektrica_app
+        # SELECT-only grant on staff_user (migration 011) -- confirmed by
+        # actually running this route under ELEKTRICA_DB_SET_ROLE=elektrica_app
+        # (2026-09-04 cron cycle) rather than assumed. Surfaced as a clean
+        # 403 instead of a bare framework 500, same "client error, not a
+        # server bug" discipline every other route in this file already
+        # follows for its own known rejection cases.
+        raise HTTPException(
+            status_code=403,
+            detail="Staff provisioning requires a privileged (non-elektrica_app) "
+                   "DB connection -- elektrica_app has SELECT-only on staff_user "
+                   "by design (migration 011).",
+        )
     return _staff_to_out(staff)
 
 
@@ -604,4 +631,13 @@ def set_staff_active(google_email: str, body: StaffActiveRequest, cur=Depends(ge
         staff = repo.set_staff_user_active(cur, google_email, body.active, body.actor)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except psycopg2.errors.InsufficientPrivilege:
+        # Same real, verified gap as provision_staff() above -- not a
+        # theoretical case, reproduced live via curl this cycle.
+        raise HTTPException(
+            status_code=403,
+            detail="Deactivating/reactivating staff requires a privileged "
+                   "(non-elektrica_app) DB connection -- elektrica_app has "
+                   "SELECT-only on staff_user by design (migration 011).",
+        )
     return _staff_to_out(staff)

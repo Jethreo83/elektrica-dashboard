@@ -1,0 +1,37 @@
+-- 012_fix_elektrica_app_sequence_grants.sql
+-- FIX, not a new feature: migration 008's `GRANT USAGE, SELECT ON ALL
+-- SEQUENCES IN SCHEMA elektrica TO elektrica_app;` (its line 53) runs
+-- AFTER elektrica.payment is created but BEFORE elektrica.toll and
+-- elektrica.compliance_item are created later in the same file. Postgres's
+-- `ALL SEQUENCES IN SCHEMA` is a snapshot at GRANT-execution time, not a
+-- standing dynamic rule (migration 002's own header comment already says
+-- this explicitly -- "GRANT ALL TABLES/SEQUENCES IN SCHEMA is a snapshot
+-- at GRANT time in Postgres, NOT dynamic. Re-granting explicitly here to
+-- be correct rather than assume" -- but migration 008 didn't follow its
+-- own repo's documented precedent for the sequences it created after its
+-- own blanket grant line).
+--
+-- CONCRETE SYMPTOM, not a theoretical gap: found by actually running the
+-- app layer under a real `SET ROLE elektrica_app` connection for the
+-- first time (scripts/_smoke_elektrica_app_role.py, 2026-09-04 cron
+-- cycle) -- every prior smoke/live run in this repo had used
+-- neondb_owner, which never surfaces this because neondb_owner owns
+-- every sequence outright. The very first `INSERT INTO elektrica.toll`
+-- issued as elektrica_app failed with:
+--   psycopg2.errors.InsufficientPrivilege: permission denied for
+--   sequence toll_id_seq
+-- (compliance_item_id_seq has the identical gap for the identical
+-- reason -- not yet observed via a failing INSERT only because the app
+-- layer's compliance_item write path hasn't been smoke-tested under
+-- elektrica_app yet, but the grant history proves it's affected too.)
+--
+-- FIX: explicit, named re-grants for exactly the two sequences migration
+-- 008's blanket line missed, rather than another blanket
+-- "ALL SEQUENCES" (which would just repeat the same footgun for whatever
+-- table+sequence gets added next after this migration's own GRANT line
+-- in some future migration). This mirrors the discipline migration 002
+-- already named correctly for elektrica.vehicle's sequence -- applying
+-- it retroactively here for the two sequences that slipped through.
+
+GRANT USAGE, SELECT ON elektrica.toll_id_seq TO elektrica_app;
+GRANT USAGE, SELECT ON elektrica.compliance_item_id_seq TO elektrica_app;
