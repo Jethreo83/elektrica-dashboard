@@ -621,3 +621,162 @@ other unblocked schema item identified in the handoff's build order beyond
 what's now built (rental spine through comms). Backend/API server and
 frontend are deliberately last per ADR-001 v2 — still nothing built there
 by design, data layer first.
+
+## 2026-09-04 (later, daily cron cycle) — first app-layer code: app/models.py, app/repository.py, app/api.py, real live verification
+
+Pulled origin/main first (no new commits since migration 011's promotion
+and the staff-provisioning backlog entry — no conflicting concurrent
+work). Re-verified staging state by direct query rather than trusting
+memory: staging only had `renter` + `staff_user` (migrations 002-010 had
+been lost between sessions again, same shared-staging-branch churn
+flagged in prior entries). Reapplied migrations 002 through 010 in order
+before starting app-layer work — staging now carries the full chain
+(`renter`, `vehicle`, `rental`, `rental_event`, `rental_proposal`,
+`comparable_set`, `demand`, `payment`, `toll`, `compliance_item`,
+`staff_user` in `elektrica`; `person`, `person_merge`, `communication`,
+`document`, `document_template`, `outbound_log` in `platform`).
+
+Per ADR-001 v2's build-order discipline (schema first, backend once the
+schema is verified, frontend last), this is the first backend code in
+this repo — Complete Collision's `app/` (same repo family, same Neon
+project, same conventions author) served as the direct pattern to copy,
+not reinvent: dataclass models mirroring SQL 1:1, a thin repository
+layer with all SQL parametrized, a FastAPI wrapper with no auth yet
+(same explicit "not yet built" flag Collision's api.py carries), and a
+mocked test_api.py + pure-logic test_models.py pair.
+
+- `app/db.py` — connection helper, identical shape to Collision's:
+  connection string read from a named env var only, never hardcoded;
+  same role/grant-gap warning (`elektrica_app` has no INSERT on
+  `platform.person`, by design, migration 001) documented in the module
+  docstring rather than silently worked around.
+- `app/models.py` — dataclasses for every elektrica/platform entity this
+  repo has migrated so far (Renter, Vehicle, Rental, RentalEvent,
+  RentalProposal, Toll, Demand, ComparableSet, Payment, ComplianceItem,
+  StaffUser) plus every enum, matching Postgres enum labels exactly.
+  `__post_init__` mirrors each table's real CHECK constraints (caught
+  one real bug doing this — see below). `RENTAL_VALID_NEXT_STATES` +
+  `validate_rental_transition()` is a **documentation/fast-fail mirror**
+  of `elektrica.rental_valid_next_states()` (migrations 003+007) as a
+  graph (Elektrica's machine branches/loops, unlike Collision's
+  strictly-forward `JOB_STATUS_SEQUENCE` list) — the DB trigger chain
+  remains the actual source of truth; this only saves a round trip on
+  an obviously-illegal jump and can never be more permissive than the
+  DB (it deliberately does NOT attempt the vls.case cross-schema
+  litigation gate, migration 007's `rental_event_check_litigation` —
+  that needs a real DB read this layer doesn't duplicate on purpose).
+  Vehicle enum values inherit migration 002's PLACEHOLDER caveat
+  verbatim, flagged in the module docstring, not silently presented as
+  settled.
+- `app/repository.py` — one function per real operation across every
+  migrated table. The one genuinely different discipline from
+  Collision's flat status field: `elektrica.rental.current_state` is
+  NEVER written directly from this layer — `advance_rental_state()` is
+  the only path, and it inserts a `rental_event` row and lets the DB
+  trigger derive the cached `current_state`, matching the DB's own
+  enforcement (a direct `UPDATE` to `current_state` is blocked by
+  trigger even under `neondb_owner`, so there's no accidental bypass
+  even from a privileged connection). `decide_rental_proposal()` is
+  written to explicitly NOT touch `elektrica.rental` — verified live,
+  see below — matching handoff §1.7's "never auto-applied to a
+  legal-record field."
+- `app/api.py` — FastAPI wrapper: Fleet board (`/fleet/out`,
+  `/fleet/available`, handoff §2.5), rental CRUD + state transitions,
+  the bot proposal contract (`POST /rentals/{id}/proposals`, handoff
+  §1.7's literal shape) + a pending-queue + decision endpoint, demand
+  creation/send/aging, toll creation/confirmation, payment creation,
+  vehicle revenue summary, compliance expiring-soon. No auth layer yet
+  — flagged explicitly in the module docstring as the real gap handoff
+  §1.7 calls out ("API key or nothing") that must close before any real
+  deploy, not silently assumed away. Never started as a running process
+  by anything in this repo automatically; run by a human on demand only.
+
+**Two real bugs found and fixed by actually running this against live
+staging data, not just mocks:**
+1. `RentalEvent.__post_init__`'s mirror of
+   `rental_event_confirmed_by_required` had the CHECK's logic
+   backwards (mirrored `confirmed = false OR confirmed_by IS NOT NULL`
+   as "unconfirmed requires confirmed_by" instead of the correct
+   "confirmed requires confirmed_by"). Caught immediately by
+   `scripts/_smoke_repository.py`'s first `advance_rental_state()` call
+   raising a real `psycopg2.errors.CheckViolation` — the DB was right,
+   the Python mirror was wrong. Fixed in `app/models.py` and
+   `app/repository.py` (which wasn't passing `confirmed_by` on
+   DB-confirmed transitions at all); `test_models.py` had a test
+   asserting the wrong-direction behavior too, corrected alongside.
+2. `list_pending_rental_proposals()` originally queried
+   `elektrica.pending_rental_proposals` (the VIEW from migration 004) —
+   that view deliberately projects only 6 columns for a "confirm bot
+   proposal" screen (no `status`/`decided_by`/`decided_at`/`created_by`),
+   so `_rental_proposal_from_row()` KeyError'd trying to round-trip it
+   into a full `RentalProposal`. Fixed by querying the base table with
+   the same `WHERE status = 'pending' ORDER BY observed_at` the view
+   uses, documented inline so a future session doesn't "fix" it back to
+   the view without re-reading why.
+
+**Verification, in increasing order of realism (same discipline as every
+migration's verify_NNN.sql, applied to app code for the first time):**
+- `python test_models.py` — 20/20 pure-logic tests (no DB), covering
+  every `__post_init__` CHECK-constraint mirror and the rental
+  transition graph (forward, backward-rejected, skip-rejected, the
+  `needs_more_information` rework loop, `resolved` terminality).
+- `python test_api.py` — 29/29 HTTP-layer tests against a real FastAPI
+  `TestClient`, every repository call mocked (no DB). Caught a real
+  **route-ordering bug**: `/rentals/blocked` was registered after
+  `/rentals/{rental_id}`, so FastAPI tried to parse `"blocked"` as an
+  int path param and returned 422 instead of routing correctly — fixed
+  by moving the literal route before the parametrized one (documented
+  inline in `app/api.py` so it isn't silently reintroduced).
+- `python scripts/_smoke_repository.py ELEKTRICA_STAGING_URL` — full
+  real-execution smoke test against the Neon staging branch:
+  person/renter creation, vehicle creation + bot position update,
+  rental creation, `active -> finished -> needs_demand` via
+  `advance_rental_state` (plus a rejected illegal skip straight to
+  `resolved`), bot proposal creation + pending-queue read + accept
+  decision **with a live assertion that `rental.current_state` did not
+  change as a side effect of accepting the proposal** (the handoff
+  §1.7 guarantee, checked against a real row, not a mock), demand
+  creation + mark-sent, toll creation + confirmation, manual payment
+  creation, and a DELETE-rejection probe against the append-only
+  `payment` trigger (confirmed the DB rejects it and the `cursor()`
+  context manager rolls back cleanly without corrupting the
+  already-committed happy path, since the probe runs in its own
+  transaction). All checks passed. Left permanent staging residue
+  (VIN `SMOKETESTVIN00042`, `created_by` = `smoke_test`/`bot_smoke`) —
+  intentional: `elektrica.rental_event` is itself append-only with no
+  `ON DELETE CASCADE`, so once a rental has any events it (and
+  everything that FKs to it) is permanently un-deletable via normal
+  DML, same as every other financial/legal audit table in this schema.
+  Printed explicitly in the script's own output for a future session
+  or Jed to recognize if a staging reset needs to distinguish this from
+  real dev data.
+- **Live HTTP verification** — actually ran
+  `uvicorn app.api:app --port 8123` (background, localhost-only, killed
+  immediately after) against the same staging connection, then hit it
+  with real `curl` calls: `GET /health`, `/fleet/available` (returned
+  the smoke test's own vehicle), `/rentals/blocked`,
+  `/vehicles/revenue-summary` (correctly reflecting the smoke test's
+  $450 payment), `POST /rentals` (created rental id=4 against real
+  vehicle/renter rows), `POST /rentals/4/transition` to `finished`
+  (200), then an illegal skip straight to `resolved` (correctly 400 with
+  the DB's real error message), then `POST /rentals/4/proposals`
+  (200). This is the first genuinely live, non-mocked, non-scripted
+  request/response cycle against this codebase's HTTP surface — never
+  exposed beyond localhost, process killed at the end of verification,
+  no deploy of any kind occurred.
+
+**Not done / explicitly deferred, not silently skipped:**
+- No auth layer on the bot-write proposal endpoint — flagged in
+  `app/api.py`'s own module docstring as the real gap before any deploy
+  consideration, matching handoff §1.7's explicit "API key or nothing"
+  requirement.
+- `insurer_payment`/`adjuster` app-layer code not started — still
+  schema-blocked on the real historical export (unchanged blocker).
+- Frontend: not started, deliberately last per ADR-001 v2.
+- Staff-user provisioning workflow (the actual API path, not just the
+  schema) — still queued in `docs/BACKLOG.md`, unchanged this cycle;
+  `provision_staff_user_for_existing_person()` exists in
+  `app/repository.py` (mirroring Collision's function of the same name)
+  but has no HTTP route yet, same "exists at the repository layer,
+  no route wired" state Collision's own staff provisioning was in when
+  it was first built.

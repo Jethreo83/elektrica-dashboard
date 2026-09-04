@@ -19,8 +19,9 @@ briefly ended up on `origin/main` before Jed's review: `docs/OVERNIGHT_DECISIONS
 
 
 
-**No application/API/frontend exists yet** — data layer only, same
-build-order discipline as VLS (schema first).
+**Data layer built and verified first (schema below); Phase 1 backend
+app code (`app/`) now exists on top of it, no auth, never deployed — see
+"App layer" section below. Frontend: not started.**
 
 ### Schema — production (Neon project `aged-art-92489373`)
 
@@ -113,6 +114,32 @@ Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 Decided-but-not-yet-actionable items (no dependency exists yet to build
 against): `docs/BACKLOG.md`.
 
+## App layer (Phase 1, no auth, never deployed)
+
+`app/db.py` + `app/models.py` + `app/repository.py` + `app/api.py` — the
+first backend code in this repo, built after the schema above was
+verified on staging (ADR-001 v2's schema-first discipline). Modeled
+directly on Complete Collision's `app/` (same repo family, same
+conventions): dataclasses mirror SQL 1:1, all SQL is parametrized in the
+repository layer, FastAPI is a thin wrapper with **no authentication
+yet** (flagged explicitly — handoff §1.7 requires a real API key layer
+for bot callers before any deploy, not implemented). Covers: Fleet board,
+rental CRUD + state transitions (via `advance_rental_state()`, the only
+path that can move `current_state` — mirrors the DB's own
+trigger-enforced restriction), the bot proposal contract, demand
+create/send/aging, toll create/confirm, payment create, vehicle revenue
+summary, compliance expiring-soon.
+
+Verified in increasing order of realism: `python test_models.py` (20/20,
+pure logic), `python test_api.py` (29/29, mocked HTTP layer),
+`python scripts/_smoke_repository.py ELEKTRICA_STAGING_URL` (full
+real-execution smoke test against Neon staging), and a live
+`uvicorn`+`curl` session against the same staging branch (localhost-only,
+process killed after). Two real bugs found this way, not just written
+around: a backwards CHECK-constraint mirror in `RentalEvent`, and a
+route-ordering bug (`/rentals/blocked` vs `/rentals/{rental_id}`). Full
+detail in `docs/BUILD_LOG.md`'s latest entry.
+
 ## Deploy process
 
 Identical discipline to VLS dashboard: every migration applied to the Neon
@@ -148,4 +175,8 @@ JP-only litigation branch, not forked.
 ## Not yet built
 
 - `insurer_payment` + `adjuster`, historical import (export-blocked)
-- Backend/API server, frontend (deliberately last, per ADR-001)
+- Auth layer on the bot proposal endpoint (handoff §1.7's "API key or
+  nothing" requirement) — needed before any real deploy, not before now
+- Staff-user provisioning HTTP route (repository function exists,
+  `docs/BACKLOG.md`)
+- Frontend (deliberately last, per ADR-001)
