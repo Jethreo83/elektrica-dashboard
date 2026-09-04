@@ -102,6 +102,13 @@ build-order discipline as VLS (schema first).
   relocation) since the shared-conventions doc already names both
   Elektrica and Complete Collision as callers. No placeholder fields.
   Staging-only, awaiting Jed's review (new schema, not a drift correction).
+- **`elektrica.staff_user`** (`migrations/011_elektrica_staff_user.sql`)
+  — staff/role table needed for the shell launcher's per-business door,
+  modeled directly on `vls.staff_user`/`collision.staff_user`. Table
+  shape confirmed-safe by precedent; role enum values (`owner`, `staff`)
+  are placeholder pending Jed's answer on how many staff roles Elektrica
+  actually needs (queued in `docs/OVERNIGHT_DECISIONS.md`, low urgency).
+  Staging-only.
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 

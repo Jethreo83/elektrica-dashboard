@@ -442,6 +442,49 @@ merely an open question Jed needed to resolve from scratch.
 Schema work is now at a genuine stopping point again: `insurer_payment`/
 `adjuster` and any Fleet/carrier corrections remain export-blocked.
 
+## 2026-09-04 (later still) — elektrica.staff_user for the shell launcher
+
+hermes relayed a non-urgent note from shell-dashboard's ADR: the new
+shell bot's launcher gates each business's "door" on that business having
+its own staff/role table, and Elektrica has none yet (unlike VLS's
+`vls.staff_user`, migration 005, and Collision's `collision.staff_user`,
+migration 004) — not a blocker for anything in progress, just flagged so
+it isn't a surprise later. Asked to match the same shape when I get to
+it: `id, google_email, role enum, active flag`.
+
+- `migrations/011_elektrica_staff_user.sql` — `elektrica.staff_user`,
+  modeled directly on `vls.staff_user` (read directly, per Jed's standing
+  clearance to read VLS schema/SQL) and `collision.staff_user` (same
+  repo family): `person_id` FK to `platform.person`, `role` enum,
+  `google_email` (unique, domain-restricted), `active` flag,
+  `provisioned_by_staff_user_id` self-reference for admin-provisioned
+  staff (no self-signup), full audit columns.
+- **Field provenance, explicit:** the table SHAPE is confirmed-safe by
+  direct precedent (two existing, working implementations to copy from).
+  The `elektricarentals.com` email domain is sourced from a real filename
+  in `~/Downloads` (a certificate PDF named with `jed@elektricarentals.com`)
+  — real evidence, not invented, but weaker than VLS's domain source, so
+  flagged as such rather than presented with unearned confidence. The
+  **role enum values are placeholder** (`owner`, `staff` — a minimal set
+  covering "Jed only" as a single `owner` row, since no source document
+  ever answered the original bot's own open question #5, "will other
+  staff need dashboard access?"). Elektrica_app's grant deliberately
+  mirrors VLS's tighter SELECT-only pattern (not Collision's broader
+  grant, which reflected an undecided provisioning boundary at the time
+  Collision built it) — nothing here suggests Elektrica needs the looser
+  version.
+- Verified with `scripts/verify_010.sql` — 6 checks, all passed: row
+  creation, domain-restriction CHECK, one-row-per-person uniqueness, the
+  provisioning self-reference chain, `elektrica_app`'s SELECT-only access
+  (INSERT correctly rejected), and the `updated_at` trigger firing on
+  UPDATE.
+- **Not promoted to production** — the role enum is placeholder, same
+  discipline as every other placeholder field in this schema. Adding an
+  explicit open item to `docs/OVERNIGHT_DECISIONS.md` for Jed: does
+  Elektrica need more than two roles (owner/staff), or is that minimal
+  set actually correct? Low urgency — doesn't block anything else, but
+  needed before promoting.
+
 ## 2026-09-04 (morning, brief note) — accidental push resolved, SQLite track archived
 
 Jed's calls, relayed by hermes: (1) the `elektrica.*` Postgres v2 schema is

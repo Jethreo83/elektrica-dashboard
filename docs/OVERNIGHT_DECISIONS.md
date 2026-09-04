@@ -234,3 +234,36 @@ to decide here; this is a genuine external dependency (someone else's OAuth
 restoration), not a decision I can make my way out of.
 
 ---
+
+## PENDING (low urgency) — Elektrica staff role set: is `owner`/`staff` sufficient?
+
+**What:** `migrations/011_elektrica_staff_user.sql` adds `elektrica.staff_user`
+(needed for the shell launcher's per-business door, per shell-dashboard's
+ADR relayed by hermes), modeled on `vls.staff_user`/`collision.staff_user`.
+The role enum (`owner`, `staff`) is a placeholder minimal set — no source
+document ever answered the original bot's own open question #5 ("will
+other staff need dashboard access, or is it Jed only?").
+
+**Why queued instead of guessed further:** Collision's bot hit the exact
+same shape of question (receptionist permission boundaries) and handled
+it the same way I'm handling this: build the safe minimal subset, defer
+the real role/permission answer, log it as PENDING rather than invent
+role names Jed hasn't given. Following that precedent rather than
+picking a fuller role list (e.g. adding "manager" or "driver" or
+whatever) without any evidence for it.
+
+**What happens if we wait:** the table stays staging-only (not promoted)
+until Jed answers; nothing else in the build depends on this — payments,
+demands, JP litigation, etc. all work regardless of how many staff roles
+Elektrica ends up needing. The shell's Elektrica "door" simply doesn't
+render until this promotes, which is expected and already the status quo
+(hermes's note said this was "not a blocker for anything you're doing
+now, just flagging so it's not a surprise later").
+
+**What happens if I proceed anyway:** guessing additional role names
+(e.g. from the original plan's mention of a "small internal team") risks
+the same kind of drift as the document-generator schema-placement
+mistake — inventing a shape now that has to be corrected later, when
+waiting costs nothing here.
+
+---
