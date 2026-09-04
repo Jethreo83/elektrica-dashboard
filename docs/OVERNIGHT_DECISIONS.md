@@ -54,34 +54,44 @@ two copies of the same 12-state machine.
 
 ---
 
-## PENDING — Document generator: build inside `elektrica` schema, not `platform.*`
+## RESOLVED 2026-09-04 — Document generator: relocated to `platform.*` per shared convention (was drift, not just an open question)
 
-**What:** Handoff §1.3 frames the shared document generator as a platform
-primitive both VLS and Elektrica need. Migration 005 built its storage/log
-tables (`document_template`, `document`, `outbound_log`) inside the
-`elektrica` schema instead of `platform.*`.
+**Correction, not a fresh decision:** hermes pointed me at
+`docs/SHARED_CONVENTIONS.md` in vls-dashboard (from
+`INSTRUCTION_Jocasta_parallel_build_2026-09-03.md`, Jed via Claude — an
+actual cross-project convention document I hadn't read, not a new Jed
+answer). Convention #2 states the document generator is one shared
+platform primitive and explicitly says: *"don't build it inside one
+project's schema 'for now' and plan to move it later."* That is exactly
+what migration 005's own header comment reasoned through and picked the
+wrong side of — I was aware of the tradeoff and still built it in
+`elektrica` rather than `platform`, on my own reasoning rather than the
+actual house convention. This entry is corrected, not just answered.
 
-**Why queued instead of just done:** ADR-001's extraction rule is "extract
-only when a second consumer exists." VLS hasn't built a document generator
-yet (confirmed in the handoff: "neither VLS nor you have built one yet"),
-so there's no second real consumer to justify a `platform.*` placement
-tonight. But this is genuinely a cross-cutting architecture call — where
-shared infrastructure physically lives affects both businesses' schemas —
-so I'm not treating "I think the rule says elektrica-schema-for-now" as
-equivalent to Jed or hermes actually deciding that.
+**What was done:** `migrations/009_platform_document_generator.sql` moves
+`document_template`, `document`, `outbound_log` (+ their enums) from
+`elektrica` to `platform` via `ALTER ... SET SCHEMA` — no data movement,
+FK objects keep their OIDs so every existing reference
+(`elektrica.demand.generated_document_id`, etc.) continues to resolve
+without redefinition. `documents_never_sent` view recreated under
+`platform` (views don't auto-follow a moved table's schema).
+`elektrica_app` grants re-issued against the new location; deliberately
+did NOT pre-grant `vls_app`, since VLS still has no real caller yet —
+grants get added when a project has an actual need, same discipline used
+for `elektrica_app`'s `vls.case` grants in migration 007.
 
-**What happens if we wait:** Elektrica's rental-demand document flow keeps
-building on the elektrica-schema version, fully functional for Elektrica's
-own use. If Jed/hermes later want it moved to `platform.*` once VLS builds
-its own document needs, it's a straightforward move — the schema was
-written to the handoff's exact platform-primitive contract
-(template_id/version, merge_data, attachments, output_hash) specifically
-so relocation is a rename + grant change, not a redesign.
+**Verified with `scripts/verify_009.sql`** (5 checks): tables/types
+confirmed moved (0 in elektrica, 3 in platform); the full FK chain
+(`demand -> document -> document_template`) still resolves correctly
+end-to-end after the move; the relocated view works; `elektrica_app`
+can still read/write; and the append-only DELETE-blocking trigger
+(attached to the table object, not the schema) survived the move intact.
 
-**What happens if I proceed differently:** Building directly in
-`platform.*` now would preemptively couple VLS to a schema shape neither
-VLS nor Jed has reviewed, for a feature VLS hasn't asked for yet — higher
-risk than waiting, not lower.
+**Lesson for future sessions:** `docs/SHARED_CONVENTIONS.md` in
+vls-dashboard should be read proactively before building anything that
+touches `platform.*` or looks like it might become cross-project shared
+infrastructure, not just when hermes happens to mention it. Added a
+reminder of this to my own memory/notes.
 
 ---
 

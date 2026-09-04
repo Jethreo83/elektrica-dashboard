@@ -398,6 +398,50 @@ carrier-dependent corrections need the real Sheet exports. Both queued in
 `docs/OVERNIGHT_DECISIONS.md`. Reasonable stopping point for schema work
 until either the exports land or Jed has something else in mind.
 
+## 2026-09-04 (later) — document generator relocated to platform.* (correcting real drift)
+
+hermes pointed me at `docs/SHARED_CONVENTIONS.md` in vls-dashboard (from
+Jed's `INSTRUCTION_Jocasta_parallel_build_2026-09-03.md`) — a real
+cross-project convention document I had not read. Convention #2 settles
+the document-generator placement question I'd left queued: one shared
+primitive, and explicitly *"don't build it inside one project's schema
+'for now' and plan to move it later"* — which is exactly what migration
+005 did, with its own header comment reasoning through that tradeoff and
+picking the wrong side. This is a correction of drift I introduced, not
+merely an open question Jed needed to resolve from scratch.
+
+- `migrations/009_platform_document_generator.sql` — relocated
+  `document_template`, `document`, `outbound_log` (+ enums) from
+  `elektrica` to `platform` via `ALTER ... SET SCHEMA`. No data movement;
+  every existing FK (`elektrica.demand.generated_document_id`, etc.)
+  keeps resolving correctly since the underlying objects retain their
+  OIDs across a schema move. `documents_never_sent` view recreated under
+  `platform` (views don't auto-follow). `elektrica_app` grants re-issued
+  against the new location; deliberately did not pre-grant `vls_app` —
+  grants get added when VLS has an actual document-generator caller, same
+  discipline already used for `elektrica_app`'s `vls.case` grants in
+  migration 007.
+- Verified with `scripts/verify_009.sql` — 5 checks, all passed: tables
+  confirmed moved; the full FK chain
+  (`demand -> document -> document_template`) resolves correctly
+  end-to-end after the move; the relocated view works; `elektrica_app`
+  can still read/write; the append-only DELETE-blocking trigger survived
+  the move intact (triggers attach to the table object, not the schema).
+- Marked RESOLVED in `docs/OVERNIGHT_DECISIONS.md`, framed explicitly as a
+  correction rather than a fresh decision.
+- **Lesson logged for future sessions:** read
+  `docs/SHARED_CONVENTIONS.md` proactively before building anything that
+  touches `platform.*` or might become cross-project shared
+  infrastructure, rather than reasoning it out solo and waiting to be
+  told there's a real convention doc.
+- Still staging-only overall — this migration itself has no placeholder
+  fields and would be independently promotion-ready, but the tables it
+  operates on (`elektrica.demand`, `elektrica.rental`, etc.) remain
+  staging-only for their own separate reasons.
+
+Schema work is now at a genuine stopping point again: `insurer_payment`/
+`adjuster` and any Fleet/carrier corrections remain export-blocked.
+
 ## 2026-09-04 (morning, brief note) — accidental push resolved, SQLite track archived
 
 Jed's calls, relayed by hermes: (1) the `elektrica.*` Postgres v2 schema is

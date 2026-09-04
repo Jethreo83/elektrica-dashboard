@@ -55,15 +55,18 @@ build-order discipline as VLS (schema first).
   pending -> accepted/rejected decision; accepting a proposal never
   auto-writes `elektrica.rental`, by design. Inherits staging-only status
   mechanically via its FK to `elektrica.rental`.
-- **`elektrica.document_template` / `elektrica.document` / `elektrica.outbound_log`**
-  (`migrations/005_elektrica_document.sql`) — document generator
-  storage/log layer (handoff §1.3), scoped to Rentals template families
-  only. Built inside `elektrica`, not `platform.*` — queued as an open
-  placement decision in `docs/OVERNIGHT_DECISIONS.md` since VLS hasn't
-  built a document generator yet (ADR-001's extraction rule isn't
-  satisfied). Append-only generation log with output-hash enforcement;
-  `documents_never_sent` view implements the handoff's literal
-  "generated but never sent" visibility requirement. Staging-only.
+- **`platform.document_template` / `platform.document` / `platform.outbound_log`**
+  (`migrations/005_elektrica_document.sql`, relocated by
+  `migrations/009_platform_document_generator.sql`) — document generator
+  storage/log layer, per `docs/SHARED_CONVENTIONS.md` convention #2: one
+  shared primitive across all projects, living in `platform.*`, not built
+  inside any one project's schema. Originally built in `elektrica` (a
+  wrong call, corrected once the actual house convention was read — see
+  `docs/OVERNIGHT_DECISIONS.md`). Append-only generation log with
+  output-hash enforcement; `platform.documents_never_sent` view
+  implements the handoff's literal "generated but never sent" visibility
+  requirement. `elektrica_app` is the only real caller today; `vls_app`
+  gets granted access when VLS has its own first real caller, not before.
 - **`elektrica.demand` + `elektrica.comparable_set`** (`migrations/006_elektrica_demand.sql`)
   — the demand object (handoff §2.3) and its frozen market-comparable
   snapshot (§2.8). `demand_type` and the `prior_demand_id`
