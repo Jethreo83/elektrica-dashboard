@@ -6,12 +6,13 @@ node_modules/
 dist/
 data/snapshots/
 
-# Phase 1 Python app (added when scaffolding app/ -- see LOG.md)
+# Superseded Phase 1 Python app, archived at docs/superseded/phase1-sqlite-app/
 __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
-data/*.db
-data/*.db-journal
+docs/superseded/phase1-sqlite-app/data/*.db
+docs/superseded/phase1-sqlite-app/data/*.db-journal
 .venv/
 venv/
+
