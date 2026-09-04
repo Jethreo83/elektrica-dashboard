@@ -28,6 +28,14 @@ build-order discipline as VLS (schema first).
   handoff prose, pending the real Fleet sheet export (blocked on Elektrica
   Google OAuth restoration — see `docs/BUILD_LOG.md`). File carries an
   explicit DO-NOT-PROMOTE banner. Applied to staging for continued dev only.
+- **`elektrica.rental` + `elektrica.rental_event`** (`migrations/003_elektrica_rental.sql`)
+  — the spine (handoff §2.3) plus an append-only event log, same pattern as
+  `vls.case`/`vls.case_event`. Covers only Elektrica's own lifecycle portion
+  (`active` through `needs_served`); deliberately does not wire the JP
+  litigation state machine onto `needs_served` — that's an open
+  architecture question (ADR-001 v2 §7 item 5). `body_shop`/`rental_type`
+  are placeholder-shape free text pending the real Rental Management sheet
+  export. Staging-only.
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 
@@ -65,7 +73,6 @@ JP-only litigation branch, not forked.
 
 ## Not yet built
 
-- `elektrica.rental` (the spine — vehicle/renter/assignment_document_id)
 - `rental_proposal` + bot API stub
 - `demand`, `comparable_set`, shared document generator (rental demand
   letters as first real caller)
