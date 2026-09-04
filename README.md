@@ -93,6 +93,15 @@ build-order discipline as VLS (schema first).
   `vehicle_revenue_summary` views implement the original plan's reminder
   and lightweight-financials requirements as queries. No placeholder
   fields of its own. Staging-only.
+- **`platform.communication`** (`migrations/010_platform_communication.sql`)
+  — the shared communication timeline (handoff §1.5/§2.6, shared-conventions
+  #4): polymorphic attachment to a domain record (same pattern as
+  `platform.document`), propose-then-confirm `match_status` for inbound
+  carrier email matched by claim number (never auto-filed). Built directly
+  in `platform.*` from day one (learned from migration 005/009's
+  relocation) since the shared-conventions doc already names both
+  Elektrica and Complete Collision as callers. No placeholder fields.
+  Staging-only, awaiting Jed's review (new schema, not a drift correction).
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 
@@ -130,6 +139,5 @@ JP-only litigation branch, not forked.
 
 ## Not yet built
 
-- `communication` timeline (comms auto-matching, handoff §2.6)
-- `insurer_payment` + `adjuster`, historical import
+- `insurer_payment` + `adjuster`, historical import (export-blocked)
 - Backend/API server, frontend (deliberately last, per ADR-001)

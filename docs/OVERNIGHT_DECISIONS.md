@@ -183,6 +183,27 @@ question.
 
 ---
 
+## PENDING — platform.communication built as new shared schema, staging-only (routine, not urgent)
+
+**What:** `migrations/010_platform_communication.sql` — the shared
+communication timeline (handoff §1.5/§2.6, shared-conventions #4) — built
+during the standing daily cron cycle, since it was the next unblocked item
+in the handoff's own build order (§6) that migration 008 skipped over.
+
+**Why queued rather than just promoted:** unlike migration 009 (a
+same-day correction of my own drift), this is genuinely new schema Jed
+hasn't seen yet. Staying staging-only pending his normal review pass, per
+standing discipline (nothing promotes without his review).
+
+**What happens if we wait:** No functional impact — nothing currently
+depends on `platform.communication` existing in production; it has no
+FK dependents yet. Continues to exist on staging for continued dev/demo.
+
+**Nothing else blocking here** — this is a routine "here's what got built,
+please review" entry, not a real decision Jed needs to make from scratch.
+
+---
+
 ## BLOCKER — Real Fleet / carrier / insurer-payment Sheet exports
 
 **What:** Kay's `CLAUDE_TO_KAY_006` export tasking (Fleet sheet, insurance

@@ -461,3 +461,68 @@ pushed (`7fe3949`). Full incident detail already lives in
 `docs/OVERNIGHT_DECISIONS.md`, not duplicated here.
 
 Continuing with the document-generator placement question next.
+
+## 2026-09-04 (later, daily cron cycle) — platform.communication (shared timeline), staging-only
+
+Ran the standing daily build/status cycle. Pulled origin/main first (per
+memory: check for new commits from unattended sessions before writing
+anything) and picked up migration 009 (document generator relocated to
+`platform.*`) that had landed since the last cycle — reviewed it, confirmed
+via direct staging query that `platform.document`/`document_template`/
+`outbound_log` exist with the right columns and `elektrica.demand`'s FK
+chain still resolves. No conflicting work in flight.
+
+Re-checked the real Fleet/carrier/insurer-payment Sheet export blocker:
+still unresolved — `~/Downloads/elektrica_exports/` has only the two
+skeleton docs from static analysis (`DATABASE_MAP_elektrica_SKELETON.md`,
+`INTEGRATION_INVENTORY.md`), no real CSVs, no Google OAuth restoration
+noted. `insurer_payment`/`adjuster` and any Fleet-derived corrections
+remain genuinely blocked, per the existing entry in
+`docs/OVERNIGHT_DECISIONS.md`.
+
+Picked the next unblocked item from the handoff's own build order (§6):
+"... -> outbound log -> comms -> payments -> insurer_payment ..." — the
+communication timeline (handoff §1.5/§2.6, `SHARED_CONVENTIONS_NOTE.md`
+convention #4) was skipped over when migration 008 went straight to
+payment/toll/compliance_item. It has no export dependency, so built it now
+to fill that build-order gap.
+
+- `migrations/010_platform_communication.sql` — `platform.communication`:
+  polymorphic `(source_table, source_id)` attachment (same pattern as
+  `platform.document`), `direction` (inbound/outbound), `channel`
+  (call/email/sms), provenance (`source_system`), and a propose-then-
+  confirm `match_status` (confirmed/proposed/rejected) modeled directly on
+  `elektrica.rental_proposal`'s already-established immutability shape.
+  Handoff-literal: RingCentral/outbound-app comms attach automatically and
+  are confirmed by construction; inbound carrier email matched by claim
+  number attaches as a `proposed` row pending human confirmation, never
+  auto-filed ("wrong-claim attachment is worse than no attachment").
+  Placement is `platform.*` from the start, NOT staged in `elektrica`
+  first — applying this morning's migration-009 lesson directly instead of
+  repeating the mistake: the shared-conventions doc already names both
+  Elektrica and Complete Collision as callers, so there's no "wait for a
+  second consumer" ambiguity this time. `collision_app` deliberately not
+  pre-granted (added when Collision has a real caller, same discipline as
+  migration 009's `vls_app` deferral).
+- Verified with `scripts/verify_010.sql` — 8 checks, all passed on
+  staging (rolled back, no data persisted): outbound app-authored comm
+  inserted pre-confirmed; inbound proposed comm surfaces in
+  `pending_communication_matches`; match-fields-together constraint
+  enforced; confirming a proposed match succeeds; re-deciding a settled
+  match is blocked; substantive fields (subject etc.) are immutable even
+  pre-decision; DELETE is blocked (append-only); rejecting a proposed
+  match (not just confirming) is a valid decision path.
+- **Not promoted to production** — new table, no dependents yet, but
+  holding to the same discipline as every other post-001 migration: stays
+  staging-only until Jed reviews it (this is genuinely new schema, not a
+  correction, so it gets a normal review pass rather than the "just fix
+  it" treatment migration 009 got).
+- Committed and pushed (see git log for hash) with a companion
+  `scripts/verify_010.sql`. Tag deferred to Jed per standing promotion
+  discipline — this session did not self-tag `elektrica-migration-010`.
+
+**Next up:** `insurer_payment` + `adjuster` remain export-blocked. No
+other unblocked schema item identified in the handoff's build order beyond
+what's now built (rental spine through comms). Backend/API server and
+frontend are deliberately last per ADR-001 v2 — still nothing built there
+by design, data layer first.
