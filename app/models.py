@@ -446,6 +446,157 @@ class StaffUser:
 
 
 # ---------------------------------------------------------------------------
+# platform.document_template / platform.document / platform.outbound_log
+# (migrations/005, relocated to platform.* by migrations/009). No app-layer
+# code existed for these until now -- a real gap this cycle closes (the
+# shared document generator, handoff §1.3, had schema but no Python side).
+# ---------------------------------------------------------------------------
+
+class DocumentTemplateFamily(str, Enum):
+    """Matches platform.document_template_family (migrations/005, moved to
+    platform by migrations/009). Rentals-only value set for now -- VLS/
+    Consulting families get added in whichever migration gives them a real
+    caller, per migration 009's own "build when needed" discipline."""
+    RENTAL_DEMAND = "rental_demand"
+    RENTAL_AGREEMENT = "rental_agreement"
+    RETURN_AGREEMENT = "return_agreement"
+    DV_REQUEST_LETTER = "dv_request_letter"
+
+
+class OutboundChannel(str, Enum):
+    """Matches platform.outbound_channel (migrations/005/009)."""
+    FAX = "fax"
+    EMAIL = "email"
+    SMS = "sms"
+
+
+@dataclass
+class DocumentTemplate:
+    """Mirrors platform.document_template. (family, version) is unique --
+    is_active marks the current live version per family."""
+    family: DocumentTemplateFamily
+    version: int
+    template_ref: str
+    is_active: bool = True
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+
+
+@dataclass
+class Document:
+    """Mirrors platform.document -- an append-only generation log row.
+    source_table/source_id are polymorphic (e.g. 'elektrica.rental');
+    enforced at the application layer that writes this row, same as
+    elektrica.rental_event.source_ref."""
+    template_id: int
+    source_table: str
+    source_id: int
+    merge_data: dict
+    attachments: list = None  # type: ignore[assignment]
+    output_ref: Optional[str] = None
+    output_hash: Optional[str] = None
+    id: Optional[int] = None
+    generated_at: Optional[datetime] = None
+    generated_by: Optional[str] = None
+
+    def __post_init__(self):
+        if self.attachments is None:
+            self.attachments = []
+        # Mirrors document_output_hash_required_once_generated CHECK.
+        if self.output_ref is not None and self.output_hash is None:
+            raise ValueError(
+                "output_ref set without output_hash "
+                "(platform.document's document_output_hash_required_once_generated CHECK)."
+            )
+
+
+@dataclass
+class OutboundLog:
+    """Mirrors platform.outbound_log -- "generated but never sent" is
+    visible precisely because sending is this SEPARATE append-only row,
+    not a status flag on Document."""
+    document_id: int
+    channel: OutboundChannel
+    recipient: str
+    delivery_confirmation_ref: Optional[str] = None
+    id: Optional[int] = None
+    sent_at: Optional[datetime] = None
+    sent_by: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# platform.communication (migrations/010) -- shared comms timeline, handoff
+# §1.5/§2.6. No app-layer code existed for this until now either.
+# ---------------------------------------------------------------------------
+
+class CommunicationDirection(str, Enum):
+    """Matches platform.communication_direction (migrations/010)."""
+    INBOUND = "inbound"
+    OUTBOUND = "outbound"
+
+
+class CommunicationChannel(str, Enum):
+    """Matches platform.communication_channel (migrations/010)."""
+    CALL = "call"
+    EMAIL = "email"
+    SMS = "sms"
+
+
+class CommunicationMatchStatus(str, Enum):
+    """Matches platform.communication_match_status (migrations/010).
+    'confirmed': human-verified, or an outbound message the app itself
+    authored. 'proposed': inbound auto-match by claim number, pending
+    human confirmation. 'rejected': a proposed match a human rejected."""
+    CONFIRMED = "confirmed"
+    PROPOSED = "proposed"
+    REJECTED = "rejected"
+
+
+@dataclass
+class Communication:
+    """Mirrors platform.communication. Immutable except the one-time
+    proposed -> confirmed|rejected decision (migrations/010's
+    communication_restrict_update trigger) -- same propose-then-confirm
+    shape as elektrica.rental_proposal."""
+    source_table: str
+    source_id: int
+    direction: CommunicationDirection
+    channel: CommunicationChannel
+    occurred_at: datetime
+    source_system: str
+    from_ref: Optional[str] = None
+    to_ref: Optional[str] = None
+    subject: Optional[str] = None
+    transcript_ref: Optional[str] = None
+    match_status: CommunicationMatchStatus = CommunicationMatchStatus.CONFIRMED
+    match_evidence: Optional[dict] = None
+    matched_by: Optional[str] = None
+    matched_at: Optional[datetime] = None
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+
+    def __post_init__(self):
+        # Mirrors communication_match_fields_together CHECK exactly:
+        # proposed rows carry no matched_by/matched_at yet; every other
+        # status requires both (set at write time by the caller/repository,
+        # not left to drift out of sync with match_status).
+        if self.match_status == CommunicationMatchStatus.PROPOSED:
+            if self.matched_by is not None or self.matched_at is not None:
+                raise ValueError(
+                    "match_status='proposed' rows must not carry matched_by/matched_at "
+                    "(platform.communication's communication_match_fields_together CHECK)."
+                )
+        else:
+            if self.matched_by is None or self.matched_at is None:
+                raise ValueError(
+                    f"match_status={self.match_status.value!r} requires both matched_by and "
+                    "matched_at (platform.communication's communication_match_fields_together CHECK)."
+                )
+
+
+# ---------------------------------------------------------------------------
 # Rental state sequence -- documentation mirror of
 # elektrica.rental_valid_next_states() (migrations/003, updated by 007).
 # The DB is the real enforcement (see repository.advance_rental_state());

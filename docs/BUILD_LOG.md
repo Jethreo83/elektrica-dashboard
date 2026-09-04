@@ -943,3 +943,81 @@ using a hardcoded natural-key value (VIN, external record id, etc.)
 against an append-only schema should derive it per-run — a crash mid-run
 leaves permanent, undeletable residue that collides with the next
 attempt, as happened here.
+
+## 2026-09-04 (continuous cron cycle) — Document generator + communication timeline app-layer code (migrations/005/009/010 finally get a Python side)
+
+**Starting point:** pulled and reviewed the prior 5 commits (staff-provisioning
+routes, SET ROLE elektrica_app proof, migration 012). Clean working tree, no
+concurrent uncommitted work. Confirmed 58/58 existing tests passing before
+touching anything.
+
+**Gap found:** `platform.document_template`/`platform.document`/
+`platform.outbound_log` (migrations/005, relocated by 009) and
+`platform.communication` (migrations/010) had real, live-verified SQL but
+**zero app-layer code** — no dataclasses, no repository functions, no HTTP
+routes. Handoff §1.3's shared document generator and §1.5/2.6's comms
+timeline existed only as schema. Closed this cycle.
+
+**Built:**
+- `app/models.py`: `DocumentTemplate`, `Document`, `OutboundLog`,
+  `Communication` dataclasses + their enums, mirroring migrations 005/009/010
+  1:1 (same discipline as every other model in this file). `Document`'s
+  `__post_init__` mirrors `document_output_hash_required_once_generated`;
+  `Communication`'s mirrors `communication_match_fields_together` exactly
+  (proposed rows carry no matched_by/matched_at, every other status requires
+  both).
+- `app/repository.py`: `get_active_document_template`/`create_document_template`,
+  `create_document`/`get_document`/`list_documents_never_sent`,
+  `create_outbound_log`/`list_outbound_log_for_document`,
+  `create_communication`/`list_communications_for_source`/
+  `list_pending_communication_matches`/`confirm_communication_match`/
+  `reject_communication_match`. Outbound send stays a genuinely separate
+  write from document generation (handoff §1.3's own point); communication's
+  confirm/reject are the only permitted follow-up UPDATE, matching
+  `elektrica.rental_proposal`'s propose-then-confirm shape.
+- `app/api.py`: `GET /document-templates/{family}`, `POST /documents`,
+  `GET /documents/{id}`, `GET /documents/never-sent`,
+  `POST /documents/{id}/outbound`, `GET /documents/{id}/outbound`,
+  `POST /communications` (proposed vs. confirmed-by-construction via a
+  `proposed: bool` flag), `GET /communications/pending`,
+  `GET /communications` (query-param `source_table`/`source_id` — kept off
+  a path-segment shape deliberately to avoid a wildcard-route collision
+  risk), `POST /communications/{id}/confirm`, `POST /communications/{id}/reject`.
+  `/documents/never-sent` registered BEFORE `/documents/{document_id}` —
+  same routing-order fix this file's own `/rentals/blocked` note already
+  documents (FastAPI matches registration order; "never-sent" would 422 as
+  an unparseable id otherwise). Caught this by actually running it, not by
+  inspection — see verification below.
+- Tests: 7 new `test_models.py` cases (27/27 total), 22 new `test_api.py`
+  cases (58/58 total) — including the output_ref/no-hash CHECK mirror and
+  the proposed/confirmed `CommunicationMatchStatus` CHECK mirror surfacing
+  as 400, not 500.
+
+**Live-verified against real staging Postgres (`neondb_owner`), twice, at
+two different levels:**
+1. `scripts/_smoke_platform_shared_primitives.py` — direct repository-layer
+   run: created a real renter/vehicle/rental, then template -> document ->
+   outbound_log (proved `documents_never_sent` correctly includes a doc
+   before any send and excludes it after), then an outbound (confirmed-by-
+   construction) communication and an inbound proposed-then-confirmed
+   communication, including a negative check that re-deciding an
+   already-decided communication row is rejected (migrations/010's trigger
+   permits exactly one decision). All assertions passed.
+2. Real HTTP, via `uvicorn` on `127.0.0.1:8214` against the same staging
+   branch, `curl`'d through the full document + communication flow end to
+   end — this is what actually caught the `/documents/never-sent`
+   route-ordering bug above; a pure unit-test run with mocked repository
+   calls would not have. Server killed after (confirmed via process
+   manager); orphan-process check afterward showed only TIME_WAIT
+   connections, no LISTENING sockets left behind.
+
+**Committed & pushed** to `origin/main`.
+
+**Not done / explicitly deferred, not silently skipped:**
+- No template-rendering engine — `create_document()` is the storage/log
+  layer only, per migrations/005's own scope note; actually producing a PDF
+  from `merge_data` + a template is separate, future work.
+- No auth/session layer on any route (standing flag, unchanged across every
+  cycle so far).
+- `insurer_payment`/`adjuster` still export-blocked (no ETA).
+- Frontend not started (deliberately last per ADR-001 v2).

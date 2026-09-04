@@ -6,10 +6,15 @@ from decimal import Decimal
 
 from app.models import (
     ComparableSet,
+    Communication,
+    CommunicationChannel,
+    CommunicationDirection,
+    CommunicationMatchStatus,
     Demand,
     DemandRecipientType,
     DemandStatus,
     DemandType,
+    Document,
     EventSource,
     Payment,
     PaymentSource,
@@ -202,6 +207,76 @@ def test_staff_user_accepts_correct_domain_and_lowercases():
     check("test_staff_user_accepts_correct_domain_and_lowercases", su.google_email == "jed@elektricarentals.com")
 
 
+def test_document_rejects_output_ref_without_hash():
+    try:
+        Document(
+            template_id=1, source_table="elektrica.rental", source_id=1,
+            merge_data={"renter_name": "Jane Doe"}, output_ref="drive:abc123", output_hash=None,
+        )
+        check("test_document_rejects_output_ref_without_hash", False)
+    except ValueError:
+        check("test_document_rejects_output_ref_without_hash", True)
+
+
+def test_document_accepts_output_ref_with_hash():
+    d = Document(
+        template_id=1, source_table="elektrica.rental", source_id=1,
+        merge_data={"renter_name": "Jane Doe"}, output_ref="drive:abc123", output_hash="sha256:deadbeef",
+    )
+    check("test_document_accepts_output_ref_with_hash", d.output_hash == "sha256:deadbeef")
+
+
+def test_document_defaults_attachments_to_empty_list():
+    d = Document(template_id=1, source_table="elektrica.rental", source_id=1, merge_data={})
+    check("test_document_defaults_attachments_to_empty_list", d.attachments == [])
+
+
+def test_communication_proposed_rejects_matched_fields():
+    try:
+        Communication(
+            source_table="elektrica.rental", source_id=1,
+            direction=CommunicationDirection.INBOUND, channel=CommunicationChannel.EMAIL,
+            occurred_at=datetime(2026, 9, 4), source_system="ringcentral",
+            match_status=CommunicationMatchStatus.PROPOSED, matched_by="jed",
+        )
+        check("test_communication_proposed_rejects_matched_fields", False)
+    except ValueError:
+        check("test_communication_proposed_rejects_matched_fields", True)
+
+
+def test_communication_confirmed_requires_matched_fields():
+    try:
+        Communication(
+            source_table="elektrica.rental", source_id=1,
+            direction=CommunicationDirection.OUTBOUND, channel=CommunicationChannel.SMS,
+            occurred_at=datetime(2026, 9, 4), source_system="app",
+            match_status=CommunicationMatchStatus.CONFIRMED,
+        )
+        check("test_communication_confirmed_requires_matched_fields", False)
+    except ValueError:
+        check("test_communication_confirmed_requires_matched_fields", True)
+
+
+def test_communication_proposed_accepts_no_matched_fields():
+    c = Communication(
+        source_table="elektrica.rental", source_id=1,
+        direction=CommunicationDirection.INBOUND, channel=CommunicationChannel.EMAIL,
+        occurred_at=datetime(2026, 9, 4), source_system="ringcentral",
+        match_status=CommunicationMatchStatus.PROPOSED,
+    )
+    check("test_communication_proposed_accepts_no_matched_fields", c.matched_by is None)
+
+
+def test_communication_confirmed_accepts_full_matched_fields():
+    c = Communication(
+        source_table="elektrica.rental", source_id=1,
+        direction=CommunicationDirection.OUTBOUND, channel=CommunicationChannel.SMS,
+        occurred_at=datetime(2026, 9, 4), source_system="app",
+        match_status=CommunicationMatchStatus.CONFIRMED, matched_by="app", matched_at=datetime(2026, 9, 4),
+    )
+    check("test_communication_confirmed_accepts_full_matched_fields", c.matched_by == "app")
+
+
 if __name__ == "__main__":
     tests = [
         test_validate_rental_transition_allows_forward,
@@ -224,6 +299,13 @@ if __name__ == "__main__":
         test_payment_manual_no_external_id_needed,
         test_staff_user_rejects_wrong_domain,
         test_staff_user_accepts_correct_domain_and_lowercases,
+        test_document_rejects_output_ref_without_hash,
+        test_document_accepts_output_ref_with_hash,
+        test_document_defaults_attachments_to_empty_list,
+        test_communication_proposed_rejects_matched_fields,
+        test_communication_confirmed_requires_matched_fields,
+        test_communication_proposed_accepts_no_matched_fields,
+        test_communication_confirmed_accepts_full_matched_fields,
     ]
     for t in tests:
         t()

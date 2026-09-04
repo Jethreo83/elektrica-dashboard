@@ -17,10 +17,13 @@ from fastapi.testclient import TestClient
 
 from app.api import app, get_cursor
 from app.models import (
-    Demand, DemandRecipientType, DemandType, Payment, PaymentSource,
-    ProposalKind, ProposalStatus, Rental, RentalBilledTo, RentalEvent,
-    RentalProposal, RentalState, EventSource, StaffRole, StaffUser, Toll,
-    Vehicle, VehicleClass, VehicleStatus,
+    Communication, CommunicationChannel, CommunicationDirection,
+    CommunicationMatchStatus, Demand, DemandRecipientType, DemandType,
+    Document, DocumentTemplate, DocumentTemplateFamily, OutboundChannel,
+    OutboundLog, Payment, PaymentSource, ProposalKind, ProposalStatus,
+    Rental, RentalBilledTo, RentalEvent, RentalProposal, RentalState,
+    EventSource, StaffRole, StaffUser, Toll, Vehicle, VehicleClass,
+    VehicleStatus,
 )
 
 FAILED = []
@@ -99,6 +102,38 @@ def _sample_staff(**overrides) -> StaffUser:
     )
     defaults.update(overrides)
     return StaffUser(**defaults)
+
+
+def _sample_document_template(**overrides) -> DocumentTemplate:
+    defaults = dict(id=1, family=DocumentTemplateFamily.RENTAL_DEMAND, version=1, template_ref="gdoc:abc")
+    defaults.update(overrides)
+    return DocumentTemplate(**defaults)
+
+
+def _sample_document(**overrides) -> Document:
+    defaults = dict(
+        id=1, template_id=1, source_table="elektrica.rental", source_id=1,
+        merge_data={"renter_name": "Jane Doe"},
+    )
+    defaults.update(overrides)
+    return Document(**defaults)
+
+
+def _sample_outbound_log(**overrides) -> OutboundLog:
+    defaults = dict(id=1, document_id=1, channel=OutboundChannel.FAX, recipient="555-0100")
+    defaults.update(overrides)
+    return OutboundLog(**defaults)
+
+
+def _sample_communication(**overrides) -> Communication:
+    defaults = dict(
+        id=1, source_table="elektrica.rental", source_id=1,
+        direction=CommunicationDirection.INBOUND, channel=CommunicationChannel.EMAIL,
+        occurred_at=datetime(2026, 9, 4), source_system="ringcentral",
+        match_status=CommunicationMatchStatus.PROPOSED,
+    )
+    defaults.update(overrides)
+    return Communication(**defaults)
 
 
 def test_health():
@@ -404,6 +439,176 @@ def test_set_staff_active_insufficient_privilege_returns_403():
     check("test_set_staff_active_insufficient_privilege_returns_403", r.status_code == 403, r.text)
 
 
+def test_get_active_document_template_found():
+    with patch("app.api.repo.get_active_document_template", return_value=_sample_document_template()):
+        r = client.get("/document-templates/rental_demand")
+    check("test_get_active_document_template_found", r.status_code == 200 and r.json()["template_ref"] == "gdoc:abc", r.text)
+
+
+def test_get_active_document_template_not_found():
+    with patch("app.api.repo.get_active_document_template", return_value=None):
+        r = client.get("/document-templates/rental_demand")
+    check("test_get_active_document_template_not_found", r.status_code == 404, r.text)
+
+
+def test_get_active_document_template_bad_family_returns_400():
+    r = client.get("/document-templates/not_a_family")
+    check("test_get_active_document_template_bad_family_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_document():
+    with patch("app.api.repo.create_document", return_value=_sample_document()):
+        r = client.post(
+            "/documents",
+            json={
+                "template_id": 1, "source_table": "elektrica.rental", "source_id": 1,
+                "merge_data": {"renter_name": "Jane Doe"}, "actor": "jed",
+            },
+        )
+    check("test_create_document_status", r.status_code == 200, r.text)
+    check("test_create_document_body", r.json()["source_table"] == "elektrica.rental")
+
+
+def test_create_document_output_ref_without_hash_returns_400():
+    """Document.__post_init__'s CHECK mirror (platform.document,
+    migrations/005) -- must surface as 400, not 500."""
+    r = client.post(
+        "/documents",
+        json={
+            "template_id": 1, "source_table": "elektrica.rental", "source_id": 1,
+            "merge_data": {}, "actor": "jed", "output_ref": "drive:abc",
+        },
+    )
+    check("test_create_document_output_ref_without_hash_returns_400", r.status_code == 400, r.text)
+
+
+def test_get_document_found():
+    with patch("app.api.repo.get_document", return_value=_sample_document()):
+        r = client.get("/documents/1")
+    check("test_get_document_found", r.status_code == 200 and r.json()["id"] == 1)
+
+
+def test_get_document_not_found():
+    with patch("app.api.repo.get_document", return_value=None):
+        r = client.get("/documents/999")
+    check("test_get_document_not_found", r.status_code == 404)
+
+
+def test_get_documents_never_sent():
+    with patch("app.api.repo.list_documents_never_sent", return_value=[{"document_id": 1}]):
+        r = client.get("/documents/never-sent")
+    check("test_get_documents_never_sent", r.status_code == 200 and len(r.json()) == 1)
+
+
+def test_create_outbound_log():
+    with patch("app.api.repo.get_document", return_value=_sample_document()), \
+         patch("app.api.repo.create_outbound_log", return_value=_sample_outbound_log()):
+        r = client.post("/documents/1/outbound", json={"channel": "fax", "recipient": "555-0100", "actor": "jed"})
+    check("test_create_outbound_log_status", r.status_code == 200, r.text)
+    check("test_create_outbound_log_body", r.json()["channel"] == "fax")
+
+
+def test_create_outbound_log_document_not_found():
+    with patch("app.api.repo.get_document", return_value=None):
+        r = client.post("/documents/999/outbound", json={"channel": "fax", "recipient": "555-0100", "actor": "jed"})
+    check("test_create_outbound_log_document_not_found", r.status_code == 404)
+
+
+def test_create_outbound_log_bad_channel_returns_400():
+    with patch("app.api.repo.get_document", return_value=_sample_document()):
+        r = client.post("/documents/1/outbound", json={"channel": "carrier_pigeon", "recipient": "x", "actor": "jed"})
+    check("test_create_outbound_log_bad_channel_returns_400", r.status_code == 400, r.text)
+
+
+def test_get_outbound_log():
+    with patch("app.api.repo.get_document", return_value=_sample_document()), \
+         patch("app.api.repo.list_outbound_log_for_document", return_value=[_sample_outbound_log()]):
+        r = client.get("/documents/1/outbound")
+    check("test_get_outbound_log", r.status_code == 200 and len(r.json()) == 1)
+
+
+def test_create_communication_proposed():
+    with patch("app.api.repo.create_communication", return_value=_sample_communication()):
+        r = client.post(
+            "/communications",
+            json={
+                "source_table": "elektrica.rental", "source_id": 1, "direction": "inbound",
+                "channel": "email", "occurred_at": "2026-09-04T00:00:00", "source_system": "ringcentral",
+                "actor": "jed", "proposed": True,
+            },
+        )
+    check("test_create_communication_proposed_status", r.status_code == 200, r.text)
+    check("test_create_communication_proposed_body", r.json()["match_status"] == "proposed")
+
+
+def test_create_communication_outbound_confirmed_by_construction():
+    with patch(
+        "app.api.repo.create_communication",
+        return_value=_sample_communication(
+            direction=CommunicationDirection.OUTBOUND, match_status=CommunicationMatchStatus.CONFIRMED,
+            matched_by="app", matched_at=datetime(2026, 9, 4),
+        ),
+    ):
+        r = client.post(
+            "/communications",
+            json={
+                "source_table": "elektrica.rental", "source_id": 1, "direction": "outbound",
+                "channel": "email", "occurred_at": "2026-09-04T00:00:00", "source_system": "app",
+                "actor": "jed", "proposed": False,
+            },
+        )
+    check("test_create_communication_outbound_confirmed_status", r.status_code == 200, r.text)
+    check("test_create_communication_outbound_confirmed_body", r.json()["match_status"] == "confirmed")
+
+
+def test_create_communication_bad_channel_returns_400():
+    r = client.post(
+        "/communications",
+        json={
+            "source_table": "elektrica.rental", "source_id": 1, "direction": "inbound",
+            "channel": "carrier_pigeon", "occurred_at": "2026-09-04T00:00:00", "source_system": "ringcentral",
+            "actor": "jed",
+        },
+    )
+    check("test_create_communication_bad_channel_returns_400", r.status_code == 400, r.text)
+
+
+def test_get_pending_communication_matches():
+    with patch("app.api.repo.list_pending_communication_matches", return_value=[{"id": 1}]):
+        r = client.get("/communications/pending")
+    check("test_get_pending_communication_matches", r.status_code == 200 and len(r.json()) == 1)
+
+
+def test_get_communications_for_source():
+    with patch("app.api.repo.list_communications_for_source", return_value=[_sample_communication()]):
+        r = client.get("/communications", params={"source_table": "elektrica.rental", "source_id": 1})
+    check("test_get_communications_for_source", r.status_code == 200 and len(r.json()) == 1, r.text)
+
+
+def test_confirm_communication():
+    with patch(
+        "app.api.repo.confirm_communication_match",
+        return_value=_sample_communication(match_status=CommunicationMatchStatus.CONFIRMED, matched_by="jed", matched_at=datetime(2026, 9, 4)),
+    ):
+        r = client.post("/communications/1/confirm", json={"actor": "jed"})
+    check("test_confirm_communication", r.status_code == 200 and r.json()["match_status"] == "confirmed", r.text)
+
+
+def test_confirm_communication_not_found():
+    with patch("app.api.repo.confirm_communication_match", side_effect=ValueError("No proposed communication with id=999")):
+        r = client.post("/communications/999/confirm", json={"actor": "jed"})
+    check("test_confirm_communication_not_found", r.status_code == 404)
+
+
+def test_reject_communication():
+    with patch(
+        "app.api.repo.reject_communication_match",
+        return_value=_sample_communication(match_status=CommunicationMatchStatus.REJECTED, matched_by="jed", matched_at=datetime(2026, 9, 4)),
+    ):
+        r = client.post("/communications/1/reject", json={"actor": "jed"})
+    check("test_reject_communication", r.status_code == 200 and r.json()["match_status"] == "rejected", r.text)
+
+
 if __name__ == "__main__":
     tests = [
         test_health, test_fleet_out, test_create_rental, test_create_rental_bad_billed_to,
@@ -426,6 +631,16 @@ if __name__ == "__main__":
         test_get_staff_found, test_get_staff_not_found,
         test_set_staff_active_deactivate, test_set_staff_active_not_found,
         test_set_staff_active_insufficient_privilege_returns_403,
+        test_get_active_document_template_found, test_get_active_document_template_not_found,
+        test_get_active_document_template_bad_family_returns_400,
+        test_create_document, test_create_document_output_ref_without_hash_returns_400,
+        test_get_document_found, test_get_document_not_found, test_get_documents_never_sent,
+        test_create_outbound_log, test_create_outbound_log_document_not_found,
+        test_create_outbound_log_bad_channel_returns_400, test_get_outbound_log,
+        test_create_communication_proposed, test_create_communication_outbound_confirmed_by_construction,
+        test_create_communication_bad_channel_returns_400,
+        test_get_pending_communication_matches, test_get_communications_for_source,
+        test_confirm_communication, test_confirm_communication_not_found, test_reject_communication,
     ]
     for t in tests:
         t()

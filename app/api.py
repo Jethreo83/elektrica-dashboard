@@ -55,7 +55,15 @@ from app.models import (
     Demand,
     DemandRecipientType,
     DemandType,
+    Communication,
+    CommunicationChannel,
+    CommunicationDirection,
+    CommunicationMatchStatus,
+    Document,
+    DocumentTemplateFamily,
     EventSource,
+    OutboundChannel,
+    OutboundLog,
     Payment,
     PaymentSource,
     ProposalKind,
@@ -268,6 +276,103 @@ class StaffProvisionRequest(BaseModel):
 class StaffActiveRequest(BaseModel):
     active: bool
     actor: str
+
+
+class DocumentIn(BaseModel):
+    """Handoff §1.3 literal contract shape: (template_id, template_version,
+    merge_data, attachments[]) -> document. template_version is resolved by
+    the caller looking up get_active_document_template() first -- this
+    endpoint takes an already-resolved template_id, same discipline as
+    StaffProvisionRequest taking an already-resolved person_id."""
+    template_id: int
+    source_table: str
+    source_id: int
+    merge_data: dict
+    actor: str
+    attachments: list = []
+    output_ref: Optional[str] = None
+    output_hash: Optional[str] = None
+
+
+class DocumentOut(BaseModel):
+    id: int
+    template_id: int
+    source_table: str
+    source_id: int
+    output_ref: Optional[str] = None
+    output_hash: Optional[str] = None
+
+
+class OutboundLogIn(BaseModel):
+    channel: str
+    recipient: str
+    actor: str
+    delivery_confirmation_ref: Optional[str] = None
+
+
+class OutboundLogOut(BaseModel):
+    id: int
+    document_id: int
+    channel: str
+    recipient: str
+    delivery_confirmation_ref: Optional[str] = None
+
+
+class CommunicationIn(BaseModel):
+    """Handoff §1.5/§2.6: outbound rows are confirmed-by-construction
+    (the app authored them, it already knows the rental); inbound rows
+    default to match_status='proposed' pending human confirmation --
+    this schema requires the caller to be explicit about which shape it's
+    writing rather than defaulting silently to confirmed for everything."""
+    source_table: str
+    source_id: int
+    direction: str
+    channel: str
+    occurred_at: datetime
+    source_system: str
+    actor: str
+    from_ref: Optional[str] = None
+    to_ref: Optional[str] = None
+    subject: Optional[str] = None
+    transcript_ref: Optional[str] = None
+    proposed: bool = False
+    match_evidence: Optional[dict] = None
+
+
+class CommunicationOut(BaseModel):
+    id: int
+    source_table: str
+    source_id: int
+    direction: str
+    channel: str
+    subject: Optional[str] = None
+    match_status: str
+
+
+class CommunicationDecisionRequest(BaseModel):
+    actor: str
+
+
+def _document_to_out(d: Document) -> DocumentOut:
+    return DocumentOut(
+        id=d.id, template_id=d.template_id, source_table=d.source_table,
+        source_id=d.source_id, output_ref=d.output_ref, output_hash=d.output_hash,
+    )
+
+
+def _outbound_log_to_out(o: OutboundLog) -> OutboundLogOut:
+    return OutboundLogOut(
+        id=o.id, document_id=o.document_id, channel=o.channel.value,
+        recipient=o.recipient, delivery_confirmation_ref=o.delivery_confirmation_ref,
+    )
+
+
+def _communication_to_out(c: Communication) -> CommunicationOut:
+    return CommunicationOut(
+        id=c.id, source_table=c.source_table, source_id=c.source_id,
+        direction=c.direction.value, channel=c.channel.value, subject=c.subject,
+        match_status=c.match_status.value,
+    )
 
 
 def _vehicle_to_out(v: Vehicle) -> VehicleOut:
@@ -641,3 +746,139 @@ def set_staff_active(google_email: str, body: StaffActiveRequest, cur=Depends(ge
                    "SELECT-only on staff_user by design (migration 011).",
         )
     return _staff_to_out(staff)
+
+
+# --- Documents (shared platform document generator, handoff §1.3) ----------
+# Storage/log layer only -- this does NOT render a PDF. A caller looks up
+# the active template first (GET /document-templates/{family}), then
+# posts the merge_data/attachments it already assembled. Rendering itself
+# is future template-engine work, out of scope for this data layer.
+
+@app.get("/document-templates/{family}")
+def get_active_document_template(family: str, cur=Depends(get_cursor)):
+    try:
+        fam = DocumentTemplateFamily(family)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"family={family!r} must be one of {[f.value for f in DocumentTemplateFamily]}")
+    template = repo.get_active_document_template(cur, fam)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"No active document_template for family={family!r}")
+    return {"id": template.id, "family": template.family.value, "version": template.version, "template_ref": template.template_ref}
+
+
+@app.post("/documents", response_model=DocumentOut)
+def create_document(body: DocumentIn, cur=Depends(get_cursor)):
+    try:
+        document = Document(
+            template_id=body.template_id, source_table=body.source_table, source_id=body.source_id,
+            merge_data=body.merge_data, attachments=body.attachments,
+            output_ref=body.output_ref, output_hash=body.output_hash,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _document_to_out(repo.create_document(cur, document, body.actor))
+
+
+@app.get("/documents/never-sent")
+def get_documents_never_sent(cur=Depends(get_cursor)):
+    """Handoff §1.3's exact phrase: 'generated but never sent' is visible.
+    Registered BEFORE /documents/{document_id} below -- same routing-order
+    fix as /rentals/blocked (this file's earlier note): FastAPI matches in
+    registration order, so 'never-sent' would otherwise get swallowed as
+    an unparseable document_id and 422."""
+    return repo.list_documents_never_sent(cur)
+
+
+@app.get("/documents/{document_id}", response_model=DocumentOut)
+def get_document(document_id: int, cur=Depends(get_cursor)):
+    document = repo.get_document(cur, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail=f"No document with id={document_id}")
+    return _document_to_out(document)
+
+
+@app.post("/documents/{document_id}/outbound", response_model=OutboundLogOut)
+def create_outbound_log(document_id: int, body: OutboundLogIn, cur=Depends(get_cursor)):
+    if repo.get_document(cur, document_id) is None:
+        raise HTTPException(status_code=404, detail=f"No document with id={document_id}")
+    try:
+        channel = OutboundChannel(body.channel)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"channel={body.channel!r} must be one of {[c.value for c in OutboundChannel]}")
+    log = OutboundLog(
+        document_id=document_id, channel=channel, recipient=body.recipient,
+        delivery_confirmation_ref=body.delivery_confirmation_ref,
+    )
+    return _outbound_log_to_out(repo.create_outbound_log(cur, log, body.actor))
+
+
+@app.get("/documents/{document_id}/outbound", response_model=list[OutboundLogOut])
+def get_outbound_log(document_id: int, cur=Depends(get_cursor)):
+    if repo.get_document(cur, document_id) is None:
+        raise HTTPException(status_code=404, detail=f"No document with id={document_id}")
+    return [_outbound_log_to_out(o) for o in repo.list_outbound_log_for_document(cur, document_id)]
+
+
+# --- Communication timeline (shared platform primitive, handoff §1.5/§2.6) --
+# Inbound rows matched by claim number are PROPOSALS -- handoff's own words:
+# "wrong-claim attachment is worse than no attachment". This endpoint never
+# auto-confirms; confirm/reject are separate human-gated actions below.
+
+@app.post("/communications", response_model=CommunicationOut)
+def create_communication(body: CommunicationIn, cur=Depends(get_cursor)):
+    try:
+        direction = CommunicationDirection(body.direction)
+        channel = CommunicationChannel(body.channel)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    now = datetime.now()
+    try:
+        comm = Communication(
+            source_table=body.source_table, source_id=body.source_id,
+            direction=direction, channel=channel, occurred_at=body.occurred_at,
+            source_system=body.source_system, from_ref=body.from_ref, to_ref=body.to_ref,
+            subject=body.subject, transcript_ref=body.transcript_ref,
+            match_status=CommunicationMatchStatus.PROPOSED if body.proposed else CommunicationMatchStatus.CONFIRMED,
+            match_evidence=body.match_evidence,
+            matched_by=None if body.proposed else body.actor,
+            matched_at=None if body.proposed else now,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _communication_to_out(repo.create_communication(cur, comm, body.actor))
+
+
+@app.get("/communications/pending")
+def get_pending_communication_matches(cur=Depends(get_cursor)):
+    """Handoff §2.6's confirm-or-reject queue for inbound claim-number auto-matches."""
+    return repo.list_pending_communication_matches(cur)
+
+
+@app.get("/communications", response_model=list[CommunicationOut])
+def get_communications_for_source(source_table: str, source_id: int, cur=Depends(get_cursor)):
+    """Query-param form deliberately, NOT a path segment like
+    /{source_table}/{source_id}/communications -- that shape would be a
+    wildcard route matching almost any two-segment path prefix in this
+    file, risking silent collisions with every other route registered
+    after it. source_table/source_id are the polymorphic attachment key
+    (e.g. source_table='elektrica.rental', source_id=<rental id>)."""
+    return [_communication_to_out(c) for c in repo.list_communications_for_source(cur, source_table, source_id)]
+
+
+@app.post("/communications/{communication_id}/confirm", response_model=CommunicationOut)
+def confirm_communication(communication_id: int, body: CommunicationDecisionRequest, cur=Depends(get_cursor)):
+    try:
+        comm = repo.confirm_communication_match(cur, communication_id, body.actor)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _communication_to_out(comm)
+
+
+@app.post("/communications/{communication_id}/reject", response_model=CommunicationOut)
+def reject_communication(communication_id: int, body: CommunicationDecisionRequest, cur=Depends(get_cursor)):
+    try:
+        comm = repo.reject_communication_match(cur, communication_id, body.actor)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _communication_to_out(comm)
+

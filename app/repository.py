@@ -28,11 +28,20 @@ from app.models import (
     ComplianceItem,
     ComplianceItemStatus,
     ComplianceItemType,
+    Communication,
+    CommunicationChannel,
+    CommunicationDirection,
+    CommunicationMatchStatus,
     Demand,
     DemandRecipientType,
     DemandStatus,
     DemandType,
+    Document,
+    DocumentTemplate,
+    DocumentTemplateFamily,
     EventSource,
+    OutboundChannel,
+    OutboundLog,
     Payment,
     PaymentSource,
     ProposalKind,
@@ -671,4 +680,222 @@ def _staff_user_from_row(row) -> StaffUser:
         provisioned_by_staff_user_id=row["provisioned_by_staff_user_id"],
         created_at=row["created_at"], created_by=row["created_by"],
         updated_at=row["updated_at"], updated_by=row["updated_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# platform.document_template / platform.document / platform.outbound_log
+# (migrations/005, relocated by migrations/009) -- shared document
+# generator storage layer, handoff §1.3. First app-layer code for these
+# tables; they existed schema-only since 2026-09-03/04.
+# ---------------------------------------------------------------------------
+
+def get_active_document_template(cur, family: DocumentTemplateFamily) -> Optional[DocumentTemplate]:
+    """Handoff §1.3: 'Templates are versioned; a generated document
+    records the template version used.' Callers generating a document
+    look up the currently-active version for a family, then pass its id
+    into create_document() -- this function does not itself write
+    anything."""
+    cur.execute(
+        "SELECT * FROM platform.document_template WHERE family = %s AND is_active = true",
+        (family.value,),
+    )
+    row = cur.fetchone()
+    return _document_template_from_row(row) if row else None
+
+
+def create_document_template(cur, template: DocumentTemplate, actor: str) -> DocumentTemplate:
+    cur.execute(
+        """
+        INSERT INTO platform.document_template (family, version, template_ref, is_active, created_by)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (template.family.value, template.version, template.template_ref, template.is_active, actor),
+    )
+    return _document_template_from_row(cur.fetchone())
+
+
+def _document_template_from_row(row) -> DocumentTemplate:
+    return DocumentTemplate(
+        id=row["id"], family=DocumentTemplateFamily(row["family"]), version=row["version"],
+        template_ref=row["template_ref"], is_active=row["is_active"],
+        created_at=row["created_at"], created_by=row["created_by"],
+    )
+
+
+def create_document(cur, document: Document, actor: str) -> Document:
+    """Writes the append-only generation-log row (platform.document is
+    immutable from creation, migrations/005 -- DELETE/UPDATE both forbid
+    at the DB layer). merge_data is frozen at generation time per handoff
+    §1.3's reproducibility requirement; this function does not itself
+    render a PDF -- that is future template-rendering work, out of scope
+    for the data layer."""
+    cur.execute(
+        """
+        INSERT INTO platform.document (
+            template_id, source_table, source_id, merge_data, attachments,
+            output_ref, output_hash, generated_by
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            document.template_id, document.source_table, document.source_id,
+            _json(document.merge_data), _json(document.attachments),
+            document.output_ref, document.output_hash, actor,
+        ),
+    )
+    return _document_from_row(cur.fetchone())
+
+
+def get_document(cur, document_id: int) -> Optional[Document]:
+    cur.execute("SELECT * FROM platform.document WHERE id = %s", (document_id,))
+    row = cur.fetchone()
+    return _document_from_row(row) if row else None
+
+
+def list_documents_never_sent(cur) -> list[dict]:
+    """Reads platform.documents_never_sent (migrations/005/009) --
+    handoff §1.3's exact phrase: 'generated but never sent' is visible."""
+    cur.execute("SELECT * FROM platform.documents_never_sent")
+    return list(cur.fetchall())
+
+
+def _document_from_row(row) -> Document:
+    return Document(
+        id=row["id"], template_id=row["template_id"],
+        source_table=row["source_table"], source_id=row["source_id"],
+        merge_data=row["merge_data"], attachments=row["attachments"],
+        output_ref=row["output_ref"], output_hash=row["output_hash"],
+        generated_at=row["generated_at"], generated_by=row["generated_by"],
+    )
+
+
+def create_outbound_log(cur, log: OutboundLog, actor: str) -> OutboundLog:
+    """Records a send as its OWN append-only row -- deliberately separate
+    from create_document() (handoff §1.3: 'Outbound delivery ... is a
+    separate step with its own log row')."""
+    cur.execute(
+        """
+        INSERT INTO platform.outbound_log (
+            document_id, channel, recipient, delivery_confirmation_ref, sent_by
+        ) VALUES (%s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (log.document_id, log.channel.value, log.recipient, log.delivery_confirmation_ref, actor),
+    )
+    return _outbound_log_from_row(cur.fetchone())
+
+
+def list_outbound_log_for_document(cur, document_id: int) -> list[OutboundLog]:
+    cur.execute(
+        "SELECT * FROM platform.outbound_log WHERE document_id = %s ORDER BY sent_at",
+        (document_id,),
+    )
+    return [_outbound_log_from_row(r) for r in cur.fetchall()]
+
+
+def _outbound_log_from_row(row) -> OutboundLog:
+    return OutboundLog(
+        id=row["id"], document_id=row["document_id"], channel=OutboundChannel(row["channel"]),
+        recipient=row["recipient"], delivery_confirmation_ref=row["delivery_confirmation_ref"],
+        sent_at=row["sent_at"], sent_by=row["sent_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# platform.communication (migrations/010) -- shared comms timeline,
+# handoff §1.5/§2.6. First app-layer code for this table; schema-only
+# since the 2026-09-04 cron cycle that built migration 010.
+# ---------------------------------------------------------------------------
+
+def create_communication(cur, comm: Communication, actor: str) -> Communication:
+    """Writes a communication row. Callers deciding an inbound match is
+    correct/incorrect use confirm_communication_match()/
+    reject_communication_match() below, NOT a second call to this
+    function -- platform.communication only allows that one follow-up
+    UPDATE per row (migrations/010's communication_restrict_update
+    trigger), matching elektrica.rental_proposal's propose-then-confirm
+    shape exactly."""
+    cur.execute(
+        """
+        INSERT INTO platform.communication (
+            source_table, source_id, direction, channel, occurred_at,
+            from_ref, to_ref, subject, transcript_ref, source_system,
+            match_status, match_evidence, matched_by, matched_at, created_by
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            comm.source_table, comm.source_id, comm.direction.value, comm.channel.value,
+            comm.occurred_at, comm.from_ref, comm.to_ref, comm.subject, comm.transcript_ref,
+            comm.source_system, comm.match_status.value, _json(comm.match_evidence),
+            comm.matched_by, comm.matched_at, actor,
+        ),
+    )
+    return _communication_from_row(cur.fetchone())
+
+
+def list_communications_for_source(cur, source_table: str, source_id: int) -> list[Communication]:
+    """Backs a rental's (or future collision.job's) communication timeline
+    tab -- ordered newest-first, matching migrations/010's own index."""
+    cur.execute(
+        """
+        SELECT * FROM platform.communication
+        WHERE source_table = %s AND source_id = %s
+        ORDER BY occurred_at DESC
+        """,
+        (source_table, source_id),
+    )
+    return [_communication_from_row(r) for r in cur.fetchall()]
+
+
+def list_pending_communication_matches(cur) -> list[dict]:
+    """Reads platform.pending_communication_matches (migrations/010) --
+    the confirm-or-reject queue for inbound claim-number auto-matches,
+    handoff §2.6: 'attached as a proposal pending confirmation'."""
+    cur.execute("SELECT * FROM platform.pending_communication_matches")
+    return list(cur.fetchall())
+
+
+def _decide_communication_match(cur, communication_id: int, new_status: CommunicationMatchStatus, actor: str) -> Communication:
+    cur.execute(
+        """
+        UPDATE platform.communication
+        SET match_status = %s, matched_by = %s, matched_at = now()
+        WHERE id = %s AND match_status = 'proposed'
+        RETURNING *
+        """,
+        (new_status.value, actor, communication_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(
+            f"No proposed communication with id={communication_id} "
+            "(either missing or already decided -- migrations/010's trigger permits only one decision)."
+        )
+    return _communication_from_row(row)
+
+
+def confirm_communication_match(cur, communication_id: int, actor: str) -> Communication:
+    """Human confirms a proposed inbound-email claim-number match is
+    correct. Handoff §2.6: 'wrong-claim attachment is worse than no
+    attachment' -- this is the human gate that decision requires."""
+    return _decide_communication_match(cur, communication_id, CommunicationMatchStatus.CONFIRMED, actor)
+
+
+def reject_communication_match(cur, communication_id: int, actor: str) -> Communication:
+    """Human reviews a proposed match and it was wrong."""
+    return _decide_communication_match(cur, communication_id, CommunicationMatchStatus.REJECTED, actor)
+
+
+def _communication_from_row(row) -> Communication:
+    return Communication(
+        id=row["id"], source_table=row["source_table"], source_id=row["source_id"],
+        direction=CommunicationDirection(row["direction"]), channel=CommunicationChannel(row["channel"]),
+        occurred_at=row["occurred_at"], from_ref=row["from_ref"], to_ref=row["to_ref"],
+        subject=row["subject"], transcript_ref=row["transcript_ref"], source_system=row["source_system"],
+        match_status=CommunicationMatchStatus(row["match_status"]), match_evidence=row["match_evidence"],
+        matched_by=row["matched_by"], matched_at=row["matched_at"],
+        created_at=row["created_at"], created_by=row["created_by"],
     )
