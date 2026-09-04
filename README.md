@@ -82,6 +82,14 @@ build-order discipline as VLS (schema first).
   correctly on a case created from Elektrica's own schema. Still
   staging-only (inherited from `elektrica.rental`), but this piece itself
   has no placeholder fields.
+- **`elektrica.payment` + `elektrica.toll` + `elektrica.compliance_item`**
+  (`migrations/008_elektrica_payment_toll_compliance.sql`) — payment/toll
+  are handoff-literal (§1.6/§2.3), append-only; compliance_item is the
+  bot's original v1 scope (dealer license, renewal reminders) retained
+  per ADR-001 v2 §3. `compliance_items_expiring_soon` and
+  `vehicle_revenue_summary` views implement the original plan's reminder
+  and lightweight-financials requirements as queries. No placeholder
+  fields of its own. Staging-only.
 
 Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 
@@ -121,5 +129,4 @@ JP-only litigation branch, not forked.
 
 - `communication` timeline (comms auto-matching, handoff §2.6)
 - `insurer_payment` + `adjuster`, historical import
-- Compliance + lightweight Financials (bot's original v1 items)
 - Backend/API server, frontend (deliberately last, per ADR-001)

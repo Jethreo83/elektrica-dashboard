@@ -347,6 +347,57 @@ vls-dashboard's decision file.
 Compliance/lightweight Financials (no export dependency, could go next
 instead).
 
+## 2026-09-04 (morning, continued) — payment, toll, compliance_item, staging-only
+
+Continued the build order with items that have no real-Sheet-export
+dependency, while the document-generator placement question sits with
+Jed (low urgency) and the Fleet/carrier exports remain blocked.
+
+- `migrations/008_elektrica_payment_toll_compliance.sql`:
+  - `elektrica.payment` — handoff §1.6's literal spec (source enum:
+    authorize_net/check/insurer_eft/manual; external_transaction_id;
+    amount; nullable `accounting_sync_ref` reserved for a future
+    QuickBooks sync per E-7). Polymorphic against both `rental_id`
+    (required) and `demand_id` (nullable) — a payment can be a self-pay
+    rental charge with no demand, or settling a specific demand.
+    Append-only (both UPDATE and DELETE blocked) — a correction is a new
+    row, never an edit to history, same philosophy as `elektrica.document`.
+  - `elektrica.toll` — handoff §2.3's literal spec (TollOptics record id,
+    amount, date, confirmed flag). Unique on `tolloptics_record_id`.
+    Immutable except the `confirmed` flag, mirroring the confirmed/
+    confirmed_by pattern used elsewhere (no separate confirmed_by column
+    added — the handoff's literal spec for `toll` doesn't have one, so
+    none was invented).
+  - `elektrica.compliance_item` — the bot's original v1 scope (dealer
+    license, renewal reminders), retained per ADR-001 v2 §3. Field shape
+    taken from `docs/original-bot-plan.md` §4, adapted to this schema's
+    conventions (a `related_document_id` FK to `elektrica.document`
+    instead of a raw path, now that a document table exists;
+    `vehicle_id` nullable since dealer_license applies to the business,
+    not any one vehicle). `compliance_items_expiring_soon` view
+    implements the original plan's literal "renewal reminders" /
+    "expiring soon" wording as a 30-day query.
+  - `elektrica.vehicle_revenue_summary` view — the original plan's
+    "basic revenue/utilization view (vehicles earning vs. idle)," as a
+    query joining vehicle status against confirmed payment totals.
+- Verified with `scripts/verify_008.sql` — 7 checks, all passed
+  (payment/toll creation, authorize_net external-id requirement,
+  payment append-only on both UPDATE and DELETE, toll uniqueness, toll's
+  confirmed-only-mutable rule, compliance expiring-soon window correctly
+  excluding a far-out item, revenue summary reflecting the real payment).
+- **Not promoted to production** — inherits staging-only status via its
+  FK chain to `elektrica.rental`/`elektrica.vehicle`/`elektrica.demand`/
+  `elektrica.document`, same mechanical reason as every migration since
+  002. No placeholder fields of its own — every column here is either a
+  handoff-literal spec (payment, toll) or taken directly from the bot's
+  own already-approved original plan (compliance_item).
+
+**Next up:** genuinely export-blocked from here — `insurer_payment` +
+`adjuster` need the real historical payment data, and any further Fleet/
+carrier-dependent corrections need the real Sheet exports. Both queued in
+`docs/OVERNIGHT_DECISIONS.md`. Reasonable stopping point for schema work
+until either the exports land or Jed has something else in mind.
+
 ## 2026-09-04 (morning, brief note) — accidental push resolved, SQLite track archived
 
 Jed's calls, relayed by hermes: (1) the `elektrica.*` Postgres v2 schema is
