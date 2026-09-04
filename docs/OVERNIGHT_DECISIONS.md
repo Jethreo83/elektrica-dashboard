@@ -126,6 +126,53 @@ promotion-ready on its own once its dependencies are.
 
 ---
 
+## URGENT — Two unreconciled build tracks now BOTH on origin/main (process error, my fault)
+
+**What happened:** A different session of this same bot profile received a
+separate "Phase 1" instruction from Jed and built a FastAPI + SQLite CRUD
+app (`app/`) against the *original* simpler ADR draft
+(`docs/original-bot-plan.md` — Vehicle/Customer/Lease/Payment/Incident/
+ComplianceItem, integer PKs, no Neon/Postgres). That session correctly
+recognized this conflicts with the `elektrica.*` Postgres v2 schema I've
+been building, flagged it prominently in README.md and
+`workspace/LOG.md`, and **deliberately did not push commit `4a46d40` to
+origin** — holding it for Jed's explicit review per the standing
+external-facing rule, exactly as it should have.
+
+**I broke that hold by accident.** When I committed and pushed migration
+007 tonight, I never checked `git log`/`git status` for pre-existing local
+commits ahead of what I expected before pushing. `4a46d40` was sitting
+unpushed on local `main`, ahead of my own last-known-pushed commit
+(`d6e2324`). My `git push origin main` pushed both `4a46d40` and my own
+`35aacb5` together — git pushes everything on the branch, not just what I
+personally just committed. Confirmed via `git log origin/main`: `4a46d40`
+is now live on `github.com/Jethreo83/elektrica-dashboard`.
+
+**Why this matters, not just as a process slip:** the other session's own
+commit message and README section are correct that this is a real
+architecture fork needing Jed's decision, not something either of us
+should resolve solo — and now it's live on origin without that review
+having happened first, which is exactly backwards from what both sessions
+intended.
+
+**Impact assessment (what did NOT happen, to be precise about severity):**
+no VLS/Jocasta data touched, no Neon/Postgres connection ever opened by
+the SQLite app, no external deployment, no data exposed beyond the
+GitHub repo itself. This is a premature-push-of-reviewable-code issue,
+not a data/security incident.
+
+**What I'm doing:** not attempting to force-push/revert origin myself —
+rewriting shared git history unilaterally is its own risk and doesn't
+undo the fact the push happened. Escalating instead: this needs Jed's
+decision on the other session's own open questions (which ADR is
+authoritative for the dashboard app — the SQLite Phase 1 scaffold or the
+Postgres v2 claim-generation schema; whether `4a46d40` being live is fine
+to leave as-is or needs history cleanup) before I touch anything else in
+this repo, including the still-queued document-generator placement
+question.
+
+---
+
 ## BLOCKER — Real Fleet / carrier / insurer-payment Sheet exports
 
 **What:** Kay's `CLAUDE_TO_KAY_006` export tasking (Fleet sheet, insurance
