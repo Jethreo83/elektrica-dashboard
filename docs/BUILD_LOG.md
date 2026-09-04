@@ -868,3 +868,78 @@ there, not duplicated here):
   `SET ROLE elektrica_app` path works through `app/db.py`, since that's
   the actual production access pattern the schema's own grants assume,
   not just its close cousin.
+
+## 2026-09-04 (continuous cron cycle, resumed after a crashed run) — SET ROLE elektrica_app proven end-to-end; migration 012 sequence-grant fix
+
+**Starting point:** found uncommitted working-tree changes from the
+immediately prior cron run, which the delivered summary claims crashed
+mid-work (`app/api.py`, `app/db.py`, `test_api.py` modified;
+`migrations/012_fix_elektrica_app_sequence_grants.sql`,
+`scripts/_smoke_elektrica_app_role.py`, `scripts/verify_012.sql`
+untracked). No new commits on `origin/main` since `97ef34d`. Reviewed
+every uncommitted change in full before touching anything — this closes
+exactly the open item this file's own prior entry flagged (\"nobody has
+run the app layer under a literal `SET ROLE elektrica_app`\"), and the
+work was sound, just never finished/committed. Continuing it rather than
+redoing it.
+
+- Ran `test_models.py` (20/20) and `test_api.py` (38/38, the 2 new
+  `InsufficientPrivilege -> 403` cases included) clean before touching
+  the database.
+- Confirmed via direct staging query that migration 012's sequence
+  grants were already live (`has_sequence_privilege('elektrica_app', ...,
+  'USAGE'/'SELECT')` both `true` for `toll_id_seq` and
+  `compliance_item_id_seq`) — the crashed run had gotten far enough to
+  apply the grant before dying. `scripts/verify_012.sql` re-run
+  standalone to confirm formally.
+- Ran `scripts/_smoke_elektrica_app_role.py` against real staging — hit
+  a `UniqueViolation` on the very first attempt: the crashed prior run
+  had already left permanent residue at a hardcoded VIN
+  (`ROLESMOKEVIN00099`) and toll record id (`TOLL-ROLE-SMOKE-001`), and
+  this schema's append-only tables mean that residue can never be
+  deleted. **Fixed the script itself** (not a schema bug) to derive a
+  per-run-unique VIN/toll-record-id from the current timestamp, so a
+  future crash-and-resume doesn't repeat this. Re-ran clean: full happy
+  path committed as `elektrica_app` (renter → vehicle → rental through
+  every state transition → bot proposal decide → demand → toll →
+  payment) plus all 4 negative checks correctly rejected
+  (`platform.person` INSERT, `staff_user` INSERT/UPDATE, `payment`
+  DELETE) — **first real proof that the schema's actual least-privilege
+  grants (migrations 001–012) are sufficient for the full app-layer
+  happy path**, not just that the SQL is fine under `neondb_owner`.
+- **Live HTTP verification with the role switch actually engaged**
+  (the crashed run's own live-verification step, redone): ran `uvicorn`
+  with `ELEKTRICA_DB_SET_ROLE=elektrica_app` set, then `curl`'d
+  `GET /health` (200), `GET /fleet/available` (200, returned real rows
+  including this cycle's own smoke vehicle), and
+  `POST /staff` (**403**, the new `InsufficientPrivilege`-handling
+  except-clause firing for real over HTTP, not just in a mocked test) —
+  confirms the new exception handling in `app/api.py` is reachable in
+  practice under the real production access pattern. Server killed
+  after (confirmed via process manager, not just exit code).
+- **Housekeeping, not new build work:** found and killed an orphaned
+  `uvicorn` process (a separate PID, still listening on `:8123`) left
+  running from the crashed prior cycle — it should have been killed at
+  the end of that session's verification and wasn't. Used a different
+  port (`8199`) for this cycle's own live check rather than fighting
+  over the stale one.
+- Committed everything as one commit (`476d2d1`) and pushed to
+  `origin/main`. Did not squash/rewrite the crashed run's uncommitted
+  work into a different shape — kept its own framing (the SET ROLE
+  support in `app/db.py`/`app/api.py`, migration 012's fix, the new
+  smoke script) and added only the VIN-collision fix plus this log
+  entry on top.
+- **Not promoted to production:** migration 012 is a grant-only fix
+  scoped to `toll_id_seq`/`compliance_item_id_seq`, which themselves
+  belong to migration 008's tables — still staging-only for the same
+  reason migration 008 is (no placeholder fields of its own, inherits
+  status via the tables it grants against).
+
+**Open items unchanged:** `insurer_payment`/`adjuster` still
+export-blocked (no ETA); frontend not started (deliberately last per
+ADR-001 v2); no auth/session layer on any route (standing flag,
+unchanged). **Lesson for future cron cycles:** any smoke/seed script
+using a hardcoded natural-key value (VIN, external record id, etc.)
+against an append-only schema should derive it per-run — a crash mid-run
+leaves permanent, undeletable residue that collides with the next
+attempt, as happened here.
