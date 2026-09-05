@@ -315,7 +315,51 @@ and would be scope creep to bundle into the same migration.
 
 ---
 
-## NEW 2026-09-05 (cron cycle) — elektrica.vehicle (migrations 002+015) may now be promotion-ready; flagging for Jed's sign-off, not promoting unilaterally
+## NEW 2026-09-05 (cron cycle) — elektrica.demand has no HTTP route to reach 'resolved'
+
+**What:** while live-verifying migration 016 (elektrica.insurer_payment,
+see BUILD_LOG.md's matching entry) end-to-end, needed to flip a real
+demand's status to 'resolved' to exercise the auto-population trigger.
+No HTTP route exists for this -- `app/api.py` only has
+`POST /demands/{id}/mark-sent` (draft -> sent). Every later transition
+(sent -> negotiating -> no_offer/accepted -> resolved) has no route at
+all; the DB-level `elektrica.demand_status` enum and its values exist,
+but the app layer never got a way to advance a demand past 'sent'.
+
+**Why this matters:** insurer_payment's whole "populates automatically
+from every resolved demand" mechanism (handoff §2.8) is real and
+verified at the DB layer, but is currently UNREACHABLE from the actual
+dashboard -- a human using the app has no button that would ever cause
+a real insurer_payment row to be created, only a direct DB write (which
+is what this cycle had to fall back to for its own live-verification).
+
+**What to do when this is next touched:** add a route (or a few, mapping
+the demand lifecycle's real transitions -- negotiating/no_offer/accepted/
+resolved) mirroring `mark_demand_sent`'s shape. No DB-level state-machine
+trigger exists on `elektrica.demand_status` the way there is on
+`elektrica.rental_state` (migration 003) -- migration 006 never built
+one (its own header flags demand_status as PLACEHOLDER, "each has its
+own lifecycle" per handoff, not literally enumerated) -- so there's no
+sequence to violate, just a missing route. Not blocked on anything;
+straightforward next item.
+
+---
+
+## RESOLVED 2026-09-05 (cron cycle) — elektrica.insurer_payment (migration 016) built
+
+**What:** handoff §2.8's carrier market-rate exhibit -- the last unbuilt
+item in ADR-001 v2/handoff §6 build order step 3. See
+`docs/BUILD_LOG.md`'s matching entry for the full writeup (auto-population
+trigger, 8/8 verify_016.sql checks on staging, 9 new test_api.py cases,
+live HTTP verification end-to-end against real staging Postgres). Also
+found and fixed a real latent bug in `test_api.py`'s own `check()` helper
+(never raised on failure -- same bug already fixed once in
+complete-collision-dashboard's test_api.py). Nothing further to do here;
+kept as a resolved marker so a future session doesn't rediscover this as
+still-open. New open item surfaced by this work, logged separately above:
+no HTTP route exists yet to advance a demand to 'resolved'.
+
+---
 
 **Starting point this cycle:** fetched origin/main first -- 3 new commits
 landed since my last known HEAD (`66f56fd` shared-secret JWT auth/CORS
