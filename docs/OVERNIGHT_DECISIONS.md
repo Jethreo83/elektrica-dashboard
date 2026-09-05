@@ -204,34 +204,74 @@ please review" entry, not a real decision Jed needs to make from scratch.
 
 ---
 
-## BLOCKER — Real Fleet / carrier / insurer-payment Sheet exports
+## RESOLVED (with a discrepancy found) — Real Fleet / Rental Management Sheet exports landed
 
-**What:** Kay's `CLAUDE_TO_KAY_006` export tasking (Fleet sheet, insurance
-carrier contact list, insurer-payment history) has not landed —
-`~/Downloads/elektrica_exports/` still only has the two skeleton docs from
-static code analysis, no real CSVs. Blocked on Elektrica Google OAuth
-restoration on Kay's host; no ETA as of this session.
+**What:** Kay's OAuth restoration finally landed the real exports (Jed,
+2026-09-04, later): `data/real_exports/elektrica_fleet_export.json` and
+`elektrica_rental_export.json`, saved locally, correctly gitignored
+BEFORE being added (real renter PII — names, emails, rental costs — this
+repo is public). Verified the gitignore actually excludes them via
+`git check-ignore -v`, not just assumed.
 
-**Why this blocks things:** `elektrica.vehicle`'s `class` /
-`vehicle_status` / `tracking_system` enum value sets are placeholder
-(handoff prose, not real column values) — carries an explicit DO-NOT-PROMOTE
-banner. Everything downstream that FKs to `elektrica.vehicle`
-(`elektrica.rental`, in turn anything FKing to `rental`) inherits the same
-staging-only status, since Postgres won't let a migration apply to
-production if it FKs a table that doesn't exist there yet. `insurance_carrier`
-and `insurer_payment`/`adjuster` tables can't be schema-designed responsibly
-at all yet — no real columns to validate field names against.
+**Inspected structure directly (never printed PII — header/column NAMES
+are safe, string-length/type-class descriptions used for data VALUES):**
 
-**What happens if we wait:** Schema work continues on staging (rental
-lifecycle, proposals, demand/comparable_set shapes) without being blocked;
-none of it can promote to production until the export lands and the
-`elektrica.vehicle` enums are corrected.
+1. **Contradiction found, not resolved by me:** the real `Fleet info`
+   tab's columns are `Year, Make, Model, Nickname, VIN, Plate, Miles,
+   Toll Tag, Owner, Lender, Ownership Type` — confirmed twice (the
+   export's own `headers` field AND the actual header row in
+   `sample_rows[0]` match exactly). **There is no `class` or
+   `tracking_system` column.** This directly contradicts
+   ADR-001-elektrica-rentals-v2.md §2 and migration 002's own header
+   comment, both of which cite "Fleet tabs store vehicle.class +
+   vehicle.tracking_system for real" as **confirmed by Jed, 2026-09-03**.
+   Kay's *original* static-analysis-only `DATABASE_MAP_elektrica_SKELETON.md`
+   had actually flagged this correctly the first time ("not evidenced in
+   source, do not assume") — the later "confirmed" answer and the real
+   data disagree. **Caveat:** only 2 of the Fleet sheet's 88 tabs were
+   parsed into row data (`Fleet info` and `Rentals`); the ~53 per-vehicle
+   tabs were not parsed, so I cannot rule out class/tracking data living
+   there instead. Not guessing either way — not touching
+   `elektrica.vehicle`'s enum values based on this export, in either
+   direction (neither dropping the columns nor confirming the
+   placeholder), until Jed clarifies where the "confirmed" answer came
+   from vs. what this export shows.
 
-**What happens if I proceed anyway:** Already doing the sanctioned version
-of this — building on staging with explicit confirmed-vs-placeholder
-comments per field, never promoting the placeholder pieces. Nothing further
-to decide here; this is a genuine external dependency (someone else's OAuth
-restoration), not a decision I can make my way out of.
+2. **Rental Management's real headers corroborate the existing schema
+   well:** `Current Rentals` = `Vehicle, Renters Email, Renters Name,
+   Rental Type, Date Out, Date In, Rental Source, Daily Rental Rate,
+   Total Rental Cost, Out of Pocket Repairs, Diminished Value, Total
+   Loss, Status, Grand Total, Notes, Month, Year, Turo Trip ID, Jotform
+   ID, Wheelbase ID`; `Finished Rentals` adds `Tolls, Security Deposit,
+   Prior Status, Collected, Collection Status`. No contradiction with
+   `elektrica.rental`/`demand`/`toll` as built — `body_shop`/`rental_type`
+   being free TEXT rather than an enum is validated as the right call
+   (real column names now confirmed; real enum VALUE lists still not —
+   see next point).
+
+3. **Not enough data to encode enums yet:** the `Settings` tab has real
+   enum-reference columns (`Rental Type, Rental Source, Status - Rental,
+   Status - Repairs, Status - Warranty`, etc.) but the export returned
+   only ONE sample row out of a declared 93. That row shows real values
+   (Body Shops incl. `Roxie`, matching the Autocraft naming already in
+   shared CC/Elektrica memory; Rental Type incl. `Claimant`; Rental
+   Source incl. `Autocraft Wasson`) but one row of 93 is nowhere near
+   enough to safely define an enum's full value set from. Not inventing
+   enum lists from a 1% sample.
+
+4. **Export data-quality note, for whoever reads this export next:**
+   each Rental Management tab's own declared `headers` field is broken
+   — it contains the tab title repeated (e.g. `['Current Rentals']`),
+   not real column names. The real header row is in `sample_rows[1]`
+   (`sample_rows[0]` is the sheet-title row, `sample_rows[2]` is the
+   first real data row). Trusting the declared `headers` field at face
+   value would silently produce garbage.
+
+**Open question for Jed, not resolved unilaterally:** does
+`vehicle.class`/`tracking_system` live on a per-vehicle tab instead of
+`Fleet info`, or was the 2026-09-03 "confirmed" answer based on a
+different source than what this export captured? No schema change made
+either direction pending his answer.
 
 ---
 

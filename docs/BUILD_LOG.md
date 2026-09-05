@@ -1894,3 +1894,54 @@ build order) is now the only large unstarted front -- worth a cycle
 surveying the full existing route surface first to scope a minimal first
 screen deliberately, rather than guessing at scope mid-build.
 
+
+## 2026-09-04 (later) — real Fleet/Rental exports landed; inspected, discrepancy found and flagged
+
+Jed's OAuth restoration finally unblocked Kay's real exports:
+`data/real_exports/elektrica_fleet_export.json` and
+`elektrica_rental_export.json`, saved locally, already correctly
+gitignored before I touched anything (verified with `git check-ignore -v`
+rather than assumed — both files confirmed excluded).
+
+Inspected structure only, never printed any actual PII values (header/
+column names are safe to log; data values were described by length/type
+class, e.g. "looks_like_email", never printed verbatim):
+
+- **Real discrepancy found, not resolved unilaterally:** `Fleet info`'s
+  real columns are `Year, Make, Model, Nickname, VIN, Plate, Miles, Toll
+  Tag, Owner, Lender, Ownership Type` — no `class` or `tracking_system`
+  column exists, directly contradicting the ADR's own "confirmed by Jed,
+  2026-09-03" note that these columns are real. Kay's original static-
+  analysis skeleton doc had actually flagged this correctly the first
+  time ("not evidenced in source"); the real data agrees with that
+  original caution, not with the later "confirmed" answer. Caveat: only
+  2 of 88 Fleet tabs were parsed into row data — the ~53 per-vehicle
+  tabs are unparsed, so class/tracking data could still live there.
+  **Not touching `elektrica.vehicle`'s enum values in either direction**
+  pending Jed's clarification — logged as an open question, not guessed
+  at, in `docs/OVERNIGHT_DECISIONS.md`.
+- Rental Management's real headers (`Current Rentals`/`Finished Rentals`)
+  corroborate `elektrica.rental`/`demand`/`toll` as already built — no
+  contradiction, `body_shop`/`rental_type` as free TEXT (rather than an
+  enum) validated as the right call since real enum VALUE lists still
+  aren't available (the `Settings` tab has the right COLUMN names but the
+  export only returned 1 of 93 declared rows — nowhere near enough to
+  safely define enum value sets from).
+- Flagged a data-quality issue in the export itself for whoever reads it
+  next: each Rental Management tab's own declared `headers` field is
+  broken (repeats the tab title, not real columns) — the real header row
+  is buried in `sample_rows[1]`, not `sample_rows[0]`.
+- Replaced the old "BLOCKER — exports haven't landed" entry in
+  `docs/OVERNIGHT_DECISIONS.md` with the full findings above, framed as
+  RESOLVED-WITH-A-DISCREPANCY rather than either fully resolved or still
+  fully blocked.
+- No schema changes made this cycle — this was investigation and
+  flagging only, deliberately not a "the export landed so promote
+  everything" pass. Deleted the throwaway inspection script afterward;
+  nothing PII-adjacent was ever committed.
+
+**Next up:** hold on `elektrica.vehicle` enum corrections until Jed
+answers the class/tracking_system question. `insurer_payment`/`adjuster`
+historical import (handoff §2.9) remains genuinely blocked separately —
+this export didn't include payment history at all, only Fleet + Rental
+Management.
