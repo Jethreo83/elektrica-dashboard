@@ -255,10 +255,46 @@ function coerceRenter(r: any): Renter {
   return { ...r, id: Number(r.id), person_id: Number(r.person_id) };
 }
 
+export interface FleetBoardOutRow {
+  vehicle_id: number;
+  vin: string;
+  current_position: Record<string, unknown> | null;
+  position_updated_at: string | null;
+  rental_id: number | null;
+  body_shop: string | null;
+  rental_type: string | null;
+  current_state: RentalState | null;
+  start_date: string | null;
+  end_date: string | null;
+  first_name: string | null;
+  last_name: string | null;
+}
+export interface FleetBoardAvailableRow {
+  vehicle_id: number;
+  vin: string;
+  notes: string | null;
+  // Always null today -- migration 015 dropped vehicle.class (handoff
+  // §2.5 said "grouped by class" before that correction). Kept in the
+  // shape so a frontend grouping UI can be added later without a
+  // response-shape change. See docs/BACKLOG.md.
+  class: null;
+}
+function coerceFleetBoardOutRow(r: any): FleetBoardOutRow {
+  return { ...r, vehicle_id: Number(r.vehicle_id), rental_id: r.rental_id === null ? null : Number(r.rental_id) };
+}
+function coerceFleetBoardAvailableRow(r: any): FleetBoardAvailableRow {
+  return { ...r, vehicle_id: Number(r.vehicle_id) };
+}
+
 export const api = {
   // Fleet
   fleetAvailable: () => apiFetch<Vehicle[]>('/fleet/available').then((rows) => rows.map(coerceVehicle)),
   fleetOut: () => apiFetch<Vehicle[]>('/fleet/out').then((rows) => rows.map(coerceVehicle)),
+  // Fleet-board joins (handoff §2.5): Out rows carry body_shop/rental_type/
+  // renter name beside the vehicle; Available rows carry a `class` key
+  // that is always null today (see FleetBoardAvailableRow's own comment).
+  fleetBoardOut: () => apiFetch<FleetBoardOutRow[]>('/fleet-board/out').then((rows) => rows.map(coerceFleetBoardOutRow)),
+  fleetBoardAvailable: () => apiFetch<FleetBoardAvailableRow[]>('/fleet-board/available').then((rows) => rows.map(coerceFleetBoardAvailableRow)),
   getVehicle: (id: number) => apiFetch<Vehicle>(`/vehicles/${id}`).then(coerceVehicle),
   getVehicleByVin: (vin: string) => apiFetch<Vehicle>(`/vehicles/vin/${encodeURIComponent(vin)}`).then(coerceVehicle),
   vehicleRevenueSummary: () => apiFetch<any[]>('/vehicles/revenue-summary'),

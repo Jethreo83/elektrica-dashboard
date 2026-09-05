@@ -119,21 +119,32 @@ Full narrative, decisions, and verification results: `docs/BUILD_LOG.md`.
 Decided-but-not-yet-actionable items (no dependency exists yet to build
 against): `docs/BACKLOG.md`.
 
-## App layer (Phase 1, no auth, never deployed)
+## App layer
 
 `app/db.py` + `app/models.py` + `app/repository.py` + `app/api.py` — the
 first backend code in this repo, built after the schema above was
 verified on staging (ADR-001 v2's schema-first discipline). Modeled
 directly on Complete Collision's `app/` (same repo family, same
 conventions): dataclasses mirror SQL 1:1, all SQL is parametrized in the
-repository layer, FastAPI is a thin wrapper with **no authentication
-yet** (flagged explicitly — handoff §1.7 requires a real API key layer
-for bot callers before any deploy, not implemented). Covers: Fleet board,
-rental CRUD + state transitions (via `advance_rental_state()`, the only
-path that can move `current_state` — mirrors the DB's own
-trigger-enforced restriction), the bot proposal contract, demand
-create/send/aging, toll create/confirm, payment create, vehicle revenue
-summary, compliance expiring-soon.
+repository layer. FastAPI now sits behind a global shared-secret SSO JWT
+auth middleware (`enforce_staff_auth`, shell-dashboard's
+`JWT_CONTRACT.md`) gating every route except `/health` and `/docs` — set
+`ELEKTRICA_DISABLE_AUTH=1` for local/test only (`conftest.py` does this
+automatically for pytest). The bot proposal endpoint
+(`POST /rentals/{id}/proposals`) uses its own separate scoped API-key
+dependency instead of a staff JWT (handoff §1.7), fails closed (503) if
+`ELEKTRICA_BOT_API_KEY` is unset. Covers: Fleet board (+ join routes for
+Out/Available per handoff §2.5), rental CRUD + state transitions (via
+`advance_rental_state()`, the only path that can move `current_state` —
+mirrors the DB's own trigger-enforced restriction), JP-litigation handoff
+(vls.case linkage, migration 007), the bot proposal contract, demand
+create/send/aging + comparable sets, toll create/confirm, payment
+create, compliance items + expiring-soon, vehicle revenue summary,
+staff-user provisioning, document-template/document/outbound-log,
+communications timeline, insurance-carrier/adjuster CRUD,
+person-match-queue confirm-or-split admin action, JotForm renter-intake
+with email/phone normalization (`app/normalize.py`). 166/166 pytest
+passing as of 2026-09-05.
 
 Verified in increasing order of realism: `python test_models.py` (20/20,
 pure logic), `python test_api.py` (29/29, mocked HTTP layer),
@@ -179,9 +190,23 @@ JP-only litigation branch, not forked.
 
 ## Not yet built
 
-- `insurer_payment` + `adjuster`, historical import (export-blocked)
-- Auth layer on the bot proposal endpoint (handoff §1.7's "API key or
-  nothing" requirement) — needed before any real deploy, not before now
-- Staff-user provisioning HTTP route (repository function exists,
-  `docs/BACKLOG.md`)
-- Frontend (deliberately last, per ADR-001)
+- `insurer_payment` historical import (export-blocked, no ETA)
+- Real Fleet-sheet columns on `elektrica.vehicle` (Year/Make/Model/
+  Nickname/Plate/Miles/Toll Tag/Owner/Lender/Ownership Type) — needs
+  Jed's scoping decision first, see `docs/BACKLOG.md`
+- `elektrica.vehicle` (migrations 002+015) production promotion —
+  flagged as promotion-ready pending Jed's explicit per-table
+  confirmation (same discipline as every prior promotion), see
+  `docs/BACKLOG.md`
+- Migration 007's `vls.case` grant-scope flag for Jed's review
+
+## Frontend
+
+`web/` — React + TypeScript + Vite, port 5181 (pinned, `strictPort`).
+Landed 2026-09-05 (`5ea26c0`): pages for Fleet, Rentals (list+detail),
+Demands, Payments, Tolls, Compliance, Staff Admin, Person-Match Queue,
+Login. `src/api.ts` is a thin typed fetch wrapper matching every
+Pydantic response model in `app/api.py`, Bearer token from `src/auth.tsx`,
+401 forces logout. `npx tsc --noEmit` and `npm run build` both verified
+clean (0 errors) 2026-09-05. Talks to the backend via `VITE_API_BASE_URL`
+(`web/.env.example`, defaults to `http://localhost:8001`).

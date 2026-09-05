@@ -2160,3 +2160,71 @@ them; manual runner now correctly reports 127/127 (was silently running
 three unrelated one-offs: every session that adds test_api.py cases
 needs to also add them to the manual list, and at least three sessions
 now have skipped that step.
+
+## 2026-09-05 (cron cycle) — frontend merged from origin; FleetListPage wired to the actual fleet-board join routes; README's "not yet built" section brought current
+
+**Starting point this cycle:** `git fetch` first (per the lesson two
+cycles ago, this time actually followed) -- `origin/main` had one new
+commit (`5ea26c0`, full React+TS frontend, `web/`) from the dedicated
+frontend subagent flagged in prior entries as "not touched or
+duplicated here." Working tree was clean, fast-forward merge, no
+conflicts.
+
+**Verified the frontend is real, not just present:**
+- `npm install` (29 packages, 0 vulnerabilities), `npx tsc --noEmit`
+  (0 errors), `npm run build` (vite production build succeeds, 273KB
+  JS bundle).
+- Found and fixed a real, pre-existing gap while checking whether the
+  frontend actually uses the handoff §2.5 fleet-board join routes
+  (`GET /fleet-board/out`/`/available`, built two cycles ago): it
+  didn't -- `FleetListPage.tsx` called the plain `/fleet/available`
+  and `/fleet/out` (bare vehicle rows, no body_shop/rental_type/renter
+  name), even though the join routes built specifically to satisfy this
+  page's literal spec already existed and were live. Rewired
+  `web/src/api.ts` (`fleetBoardOut()`/`fleetBoardAvailable()`, new
+  `FleetBoardOutRow`/`FleetBoardAvailableRow` types matching
+  `app/repository.py`'s actual dict-row shape) and `FleetListPage.tsx`
+  (Out table now shows body shop / rental type / renter name / rental
+  state with a link through to the rental detail page; Available table
+  documents inline why `class` is always null today, matching
+  `repo.fleet_board_available()`'s own KNOWN SPEC CONFLICT comment
+  rather than hiding it).
+- Live-verified the join routes' actual returned shape against real
+  staging Postgres directly through `app/repository.py` (not curl --
+  no JWT available for this session to mint against the concurrently-
+  running dev server's `JWT_SECRET`, and minting one myself would be
+  guessing at a secret I don't own): `fleet_board_out()` returned the
+  real `vehicle_id=13`/`rental_id=11` smoke row left by a prior cycle's
+  live verification (`body_shop: 'Roxie'`, `first_name: 'Fleet'`,
+  `last_name: 'BoardVerify'`), `fleet_board_available()` returned 8 rows
+  each with `class: None` as documented. Scratch script
+  (`scripts/_scratch_fbcheck.py`) deleted immediately after use.
+- `npx tsc --noEmit` and `npm run build` both re-verified clean after
+  the rewrite. `python -m pytest` unaffected (166/166 -- this cycle's
+  change is frontend-only).
+- `README.md`'s "App layer (Phase 1, no auth, never deployed)" and "Not
+  yet built" sections were stale -- written before auth, staff routes,
+  JP-litigation, comms, carriers, person-match-queue, and the frontend
+  all landed. Rewrote both sections to match current reality (166/166
+  pytest, full route list, frontend section describing what's actually
+  built) rather than leaving a description of a repo state that no
+  longer exists.
+
+**Left running, not touched:** a concurrent session's own `uvicorn`
+(port 8001) and `vite` dev server (port 5181) were both already live
+against real staging data when this cycle started -- confirmed healthy
+(`/health` 200, protected routes 401 without a token, `/docs` 200) and
+left alone rather than killed, since another session may depend on
+them.
+
+**Not done / explicitly deferred (unchanged):** `elektrica.vehicle`
+promotion still pending Jed's explicit per-table sign-off; migration
+007's `vls.case` grant-scope flag still open; real Fleet columns
+(Year/Make/Model/etc.) still needs Jed's scoping decision;
+`insurer_payment` historical import still export-blocked.
+
+**Next up:** with the fleet-board wiring gap closed, worth checking
+whether any other frontend page is calling a narrower route than the
+backend actually offers (the same pattern just fixed here) before
+assuming frontend work is fully caught up to the backend's route
+surface.

@@ -1,17 +1,24 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, type Vehicle } from '../api';
+import { api, type FleetBoardOutRow, type FleetBoardAvailableRow } from '../api';
 
+// Handoff §2.5 literal Fleet-board spec: Out rows show body shop / rental
+// type / renter name beside each vehicle; Available rows are "grouped by
+// class" in the original spec text, but migration 015 (Jed-confirmed)
+// dropped vehicle.class entirely -- there is currently nothing to group
+// by, so this renders a single flat list (see api.ts's
+// FleetBoardAvailableRow comment / docs/BACKLOG.md for the open
+// grouping-key decision).
 export default function FleetListPage() {
-  const [available, setAvailable] = useState<Vehicle[] | null>(null);
-  const [out, setOut] = useState<Vehicle[] | null>(null);
+  const [available, setAvailable] = useState<FleetBoardAvailableRow[] | null>(null);
+  const [out, setOut] = useState<FleetBoardOutRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newVin, setNewVin] = useState('');
 
   const load = () => {
     setError(null);
-    Promise.all([api.fleetAvailable(), api.fleetOut()])
+    Promise.all([api.fleetBoardAvailable(), api.fleetBoardOut()])
       .then(([a, o]) => {
         setAvailable(a);
         setOut(o);
@@ -64,16 +71,16 @@ export default function FleetListPage() {
         </form>
       </div>
 
-      <VehicleTable title="Available" rows={available} />
-      <VehicleTable title="Out" rows={out} />
+      <OutTable rows={out} />
+      <AvailableTable rows={available} />
     </div>
   );
 }
 
-function VehicleTable({ title, rows }: { title: string; rows: Vehicle[] }) {
+function OutTable({ rows }: { rows: FleetBoardOutRow[] }) {
   return (
     <div className="ek-section">
-      <h2>{title} ({rows.length})</h2>
+      <h2>Out ({rows.length})</h2>
       {rows.length === 0 ? (
         <p style={{ color: 'var(--ek-gray)', fontSize: 13 }}>None.</p>
       ) : (
@@ -81,18 +88,60 @@ function VehicleTable({ title, rows }: { title: string; rows: Vehicle[] }) {
           <thead>
             <tr>
               <th>VIN</th>
-              <th>Status</th>
-              <th>Position</th>
+              <th>Body Shop</th>
+              <th>Rental Type</th>
+              <th>Renter</th>
+              <th>Rental State</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {rows.map((v) => (
-              <tr key={v.id}>
+              <tr key={v.vehicle_id}>
                 <td>{v.vin}</td>
-                <td><span className={`ek-badge ${v.status === 'available' ? 'ok' : 'neutral'}`}>{v.status}</span></td>
-                <td>{v.current_position ? JSON.stringify(v.current_position) : '—'}</td>
-                <td><Link className="ek-link" to={`/vehicles/${v.id}`}>View →</Link></td>
+                <td>{v.body_shop ?? '—'}</td>
+                <td>{v.rental_type ?? '—'}</td>
+                <td>{v.first_name || v.last_name ? `${v.first_name ?? ''} ${v.last_name ?? ''}`.trim() : '—'}</td>
+                <td>{v.current_state ?? '—'}</td>
+                <td>
+                  <Link className="ek-link" to={`/vehicles/${v.vehicle_id}`}>View →</Link>
+                  {v.rental_id != null && (
+                    <>
+                      {' '}
+                      <Link className="ek-link" to={`/rentals/${v.rental_id}`}>Rental →</Link>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function AvailableTable({ rows }: { rows: FleetBoardAvailableRow[] }) {
+  return (
+    <div className="ek-section">
+      <h2>Available ({rows.length})</h2>
+      {rows.length === 0 ? (
+        <p style={{ color: 'var(--ek-gray)', fontSize: 13 }}>None.</p>
+      ) : (
+        <table className="ek-table">
+          <thead>
+            <tr>
+              <th>VIN</th>
+              <th>Notes</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((v) => (
+              <tr key={v.vehicle_id}>
+                <td>{v.vin}</td>
+                <td>{v.notes ?? '—'}</td>
+                <td><Link className="ek-link" to={`/vehicles/${v.vehicle_id}`}>View →</Link></td>
               </tr>
             ))}
           </tbody>
