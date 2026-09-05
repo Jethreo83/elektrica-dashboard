@@ -2000,3 +2000,20 @@ storing a column sourced from a Sheet field that doesn't exist.
   NOT bundled into migration 015 since Jed's instruction was to drop
   class/tracking_system, not add the rest; that's new scope needing its
   own sign-off (Owner/Lender person_id-vs-free-text question especially).
+
+## 2026-09-05 — collision explained: not a third party, hermes's own frontend subagent
+
+hermes clarified the "concurrent session" that landed `66f56fd` alongside
+my in-progress migration-015 edits: it was hermes's own subagent,
+dispatched into this same repo directory to build the frontend (UI push
+targeted for Monday) at the same time I was finishing backend work --
+not an unknown third party. hermes has steered that subagent to
+git status/pull before every commit and push in smaller increments going
+forward. Confirmed independently: no damage either way, both bodies of
+work (migration 015 + JWT auth/CORS) are intact in git log, my migration/
+verify files landed byte-identical to what I wrote. Noting for the
+paper trail, not a new action item -- see this file's earlier
+"Collision note" entry for the verification steps taken at the time.
+
+`web/` directory now present, untracked, in the working tree -- that's
+the frontend subagent's in-progress work. Not touching it.
