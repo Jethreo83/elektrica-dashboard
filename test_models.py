@@ -6,10 +6,15 @@ from decimal import Decimal
 
 from app.models import (
     ComparableSet,
+    Communication,
+    CommunicationChannel,
+    CommunicationDirection,
+    CommunicationMatchStatus,
     Demand,
     DemandRecipientType,
     DemandStatus,
     DemandType,
+    Document,
     EventSource,
     Payment,
     PaymentSource,
@@ -106,24 +111,24 @@ def test_rental_event_unconfirmed_confirmed_by_optional():
     check("test_rental_event_unconfirmed_confirmed_by_optional", ev.confirmed_by is None)
 
 
-def test_demand_carrier_recipient_requires_carrier_name():
+def test_demand_carrier_recipient_requires_carrier_id():
     try:
         Demand(
             rental_id=1, demand_type=DemandType.PRIMARY_INSURER,
             recipient_type=DemandRecipientType.CARRIER, amount=Decimal("500.00"),
-            carrier_name=None,
+            carrier_id=None,
         )
-        check("test_demand_carrier_recipient_requires_carrier_name", False)
+        check("test_demand_carrier_recipient_requires_carrier_id", False)
     except ValueError:
-        check("test_demand_carrier_recipient_requires_carrier_name", True)
+        check("test_demand_carrier_recipient_requires_carrier_id", True)
 
 
-def test_demand_renter_recipient_no_carrier_name_needed():
+def test_demand_renter_recipient_no_carrier_id_needed():
     d = Demand(
         rental_id=1, demand_type=DemandType.BALANCE_TO_RENTER,
         recipient_type=DemandRecipientType.RENTER, amount=Decimal("120.00"),
     )
-    check("test_demand_renter_recipient_no_carrier_name_needed", d.carrier_name is None)
+    check("test_demand_renter_recipient_no_carrier_id_needed", d.carrier_id is None)
 
 
 def test_demand_draft_cannot_have_send_record():
@@ -202,6 +207,76 @@ def test_staff_user_accepts_correct_domain_and_lowercases():
     check("test_staff_user_accepts_correct_domain_and_lowercases", su.google_email == "jed@elektricarentals.com")
 
 
+def test_document_rejects_output_ref_without_hash():
+    try:
+        Document(
+            template_id=1, source_table="elektrica.rental", source_id=1,
+            merge_data={"renter_name": "Jane Doe"}, output_ref="drive:abc123", output_hash=None,
+        )
+        check("test_document_rejects_output_ref_without_hash", False)
+    except ValueError:
+        check("test_document_rejects_output_ref_without_hash", True)
+
+
+def test_document_accepts_output_ref_with_hash():
+    d = Document(
+        template_id=1, source_table="elektrica.rental", source_id=1,
+        merge_data={"renter_name": "Jane Doe"}, output_ref="drive:abc123", output_hash="sha256:deadbeef",
+    )
+    check("test_document_accepts_output_ref_with_hash", d.output_hash == "sha256:deadbeef")
+
+
+def test_document_defaults_attachments_to_empty_list():
+    d = Document(template_id=1, source_table="elektrica.rental", source_id=1, merge_data={})
+    check("test_document_defaults_attachments_to_empty_list", d.attachments == [])
+
+
+def test_communication_proposed_rejects_matched_fields():
+    try:
+        Communication(
+            source_table="elektrica.rental", source_id=1,
+            direction=CommunicationDirection.INBOUND, channel=CommunicationChannel.EMAIL,
+            occurred_at=datetime(2026, 9, 4), source_system="ringcentral",
+            match_status=CommunicationMatchStatus.PROPOSED, matched_by="jed",
+        )
+        check("test_communication_proposed_rejects_matched_fields", False)
+    except ValueError:
+        check("test_communication_proposed_rejects_matched_fields", True)
+
+
+def test_communication_confirmed_requires_matched_fields():
+    try:
+        Communication(
+            source_table="elektrica.rental", source_id=1,
+            direction=CommunicationDirection.OUTBOUND, channel=CommunicationChannel.SMS,
+            occurred_at=datetime(2026, 9, 4), source_system="app",
+            match_status=CommunicationMatchStatus.CONFIRMED,
+        )
+        check("test_communication_confirmed_requires_matched_fields", False)
+    except ValueError:
+        check("test_communication_confirmed_requires_matched_fields", True)
+
+
+def test_communication_proposed_accepts_no_matched_fields():
+    c = Communication(
+        source_table="elektrica.rental", source_id=1,
+        direction=CommunicationDirection.INBOUND, channel=CommunicationChannel.EMAIL,
+        occurred_at=datetime(2026, 9, 4), source_system="ringcentral",
+        match_status=CommunicationMatchStatus.PROPOSED,
+    )
+    check("test_communication_proposed_accepts_no_matched_fields", c.matched_by is None)
+
+
+def test_communication_confirmed_accepts_full_matched_fields():
+    c = Communication(
+        source_table="elektrica.rental", source_id=1,
+        direction=CommunicationDirection.OUTBOUND, channel=CommunicationChannel.SMS,
+        occurred_at=datetime(2026, 9, 4), source_system="app",
+        match_status=CommunicationMatchStatus.CONFIRMED, matched_by="app", matched_at=datetime(2026, 9, 4),
+    )
+    check("test_communication_confirmed_accepts_full_matched_fields", c.matched_by == "app")
+
+
 if __name__ == "__main__":
     tests = [
         test_validate_rental_transition_allows_forward,
@@ -213,8 +288,8 @@ if __name__ == "__main__":
         test_rental_event_manual_source_ref_optional,
         test_rental_event_confirmed_requires_confirmed_by,
         test_rental_event_unconfirmed_confirmed_by_optional,
-        test_demand_carrier_recipient_requires_carrier_name,
-        test_demand_renter_recipient_no_carrier_name_needed,
+        test_demand_carrier_recipient_requires_carrier_id,
+        test_demand_renter_recipient_no_carrier_id_needed,
         test_demand_draft_cannot_have_send_record,
         test_demand_sent_status_allows_send_record,
         test_comparable_set_rejects_invalid_date_range,
@@ -224,6 +299,13 @@ if __name__ == "__main__":
         test_payment_manual_no_external_id_needed,
         test_staff_user_rejects_wrong_domain,
         test_staff_user_accepts_correct_domain_and_lowercases,
+        test_document_rejects_output_ref_without_hash,
+        test_document_accepts_output_ref_with_hash,
+        test_document_defaults_attachments_to_empty_list,
+        test_communication_proposed_rejects_matched_fields,
+        test_communication_confirmed_requires_matched_fields,
+        test_communication_proposed_accepts_no_matched_fields,
+        test_communication_confirmed_accepts_full_matched_fields,
     ]
     for t in tests:
         t()

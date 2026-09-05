@@ -315,15 +315,21 @@ class Toll:
 
 @dataclass
 class Demand:
-    """Mirrors elektrica.demand (migrations/006). status value set and
-    carrier_name/adjuster_name are PLACEHOLDER -- see DemandStatus
-    docstring and migrations/006 header."""
+    """Mirrors elektrica.demand (migrations/006, carrier/adjuster FK-wired
+    by migrations/014). status value set is still PLACEHOLDER -- see
+    DemandStatus docstring and migrations/006 header. carrier_id/
+    adjuster_id point at platform.insurance_carrier/platform.adjuster
+    (migrations/013) -- the old carrier_name/adjuster_name free-text
+    columns migrations/006 flagged as temporary are gone as of
+    migrations/014; callers must resolve a real carrier/adjuster id
+    first (e.g. via find_insurance_carrier_by_name_or_alias) rather than
+    passing a bare name."""
     rental_id: int
     demand_type: DemandType
     recipient_type: DemandRecipientType
     amount: Decimal
-    carrier_name: Optional[str] = None
-    adjuster_name: Optional[str] = None
+    carrier_id: Optional[int] = None
+    adjuster_id: Optional[int] = None
     generated_document_id: Optional[int] = None
     sent_via: Optional[str] = None   # platform.outbound_channel value, kept as str here (cross-schema enum)
     sent_at: Optional[datetime] = None
@@ -336,11 +342,12 @@ class Demand:
     updated_by: Optional[str] = None
 
     def __post_init__(self):
-        # Mirrors demand_carrier_name_required_for_carrier_recipient CHECK.
-        if self.recipient_type == DemandRecipientType.CARRIER and not self.carrier_name:
+        # Mirrors demand_carrier_required_for_carrier_recipient CHECK
+        # (migrations/014 -- replaced the old carrier_NAME-based CHECK).
+        if self.recipient_type == DemandRecipientType.CARRIER and not self.carrier_id:
             raise ValueError(
-                "recipient_type='carrier' requires carrier_name "
-                "(elektrica.demand's demand_carrier_name_required_for_carrier_recipient CHECK)."
+                "recipient_type='carrier' requires carrier_id "
+                "(elektrica.demand's demand_carrier_required_for_carrier_recipient CHECK)."
             )
         # Mirrors demand_draft_has_no_send_record CHECK.
         if self.status == DemandStatus.DRAFT and (self.sent_via or self.sent_at):
@@ -446,6 +453,157 @@ class StaffUser:
 
 
 # ---------------------------------------------------------------------------
+# platform.document_template / platform.document / platform.outbound_log
+# (migrations/005, relocated to platform.* by migrations/009). No app-layer
+# code existed for these until now -- a real gap this cycle closes (the
+# shared document generator, handoff §1.3, had schema but no Python side).
+# ---------------------------------------------------------------------------
+
+class DocumentTemplateFamily(str, Enum):
+    """Matches platform.document_template_family (migrations/005, moved to
+    platform by migrations/009). Rentals-only value set for now -- VLS/
+    Consulting families get added in whichever migration gives them a real
+    caller, per migration 009's own "build when needed" discipline."""
+    RENTAL_DEMAND = "rental_demand"
+    RENTAL_AGREEMENT = "rental_agreement"
+    RETURN_AGREEMENT = "return_agreement"
+    DV_REQUEST_LETTER = "dv_request_letter"
+
+
+class OutboundChannel(str, Enum):
+    """Matches platform.outbound_channel (migrations/005/009)."""
+    FAX = "fax"
+    EMAIL = "email"
+    SMS = "sms"
+
+
+@dataclass
+class DocumentTemplate:
+    """Mirrors platform.document_template. (family, version) is unique --
+    is_active marks the current live version per family."""
+    family: DocumentTemplateFamily
+    version: int
+    template_ref: str
+    is_active: bool = True
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+
+
+@dataclass
+class Document:
+    """Mirrors platform.document -- an append-only generation log row.
+    source_table/source_id are polymorphic (e.g. 'elektrica.rental');
+    enforced at the application layer that writes this row, same as
+    elektrica.rental_event.source_ref."""
+    template_id: int
+    source_table: str
+    source_id: int
+    merge_data: dict
+    attachments: list = None  # type: ignore[assignment]
+    output_ref: Optional[str] = None
+    output_hash: Optional[str] = None
+    id: Optional[int] = None
+    generated_at: Optional[datetime] = None
+    generated_by: Optional[str] = None
+
+    def __post_init__(self):
+        if self.attachments is None:
+            self.attachments = []
+        # Mirrors document_output_hash_required_once_generated CHECK.
+        if self.output_ref is not None and self.output_hash is None:
+            raise ValueError(
+                "output_ref set without output_hash "
+                "(platform.document's document_output_hash_required_once_generated CHECK)."
+            )
+
+
+@dataclass
+class OutboundLog:
+    """Mirrors platform.outbound_log -- "generated but never sent" is
+    visible precisely because sending is this SEPARATE append-only row,
+    not a status flag on Document."""
+    document_id: int
+    channel: OutboundChannel
+    recipient: str
+    delivery_confirmation_ref: Optional[str] = None
+    id: Optional[int] = None
+    sent_at: Optional[datetime] = None
+    sent_by: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# platform.communication (migrations/010) -- shared comms timeline, handoff
+# §1.5/§2.6. No app-layer code existed for this until now either.
+# ---------------------------------------------------------------------------
+
+class CommunicationDirection(str, Enum):
+    """Matches platform.communication_direction (migrations/010)."""
+    INBOUND = "inbound"
+    OUTBOUND = "outbound"
+
+
+class CommunicationChannel(str, Enum):
+    """Matches platform.communication_channel (migrations/010)."""
+    CALL = "call"
+    EMAIL = "email"
+    SMS = "sms"
+
+
+class CommunicationMatchStatus(str, Enum):
+    """Matches platform.communication_match_status (migrations/010).
+    'confirmed': human-verified, or an outbound message the app itself
+    authored. 'proposed': inbound auto-match by claim number, pending
+    human confirmation. 'rejected': a proposed match a human rejected."""
+    CONFIRMED = "confirmed"
+    PROPOSED = "proposed"
+    REJECTED = "rejected"
+
+
+@dataclass
+class Communication:
+    """Mirrors platform.communication. Immutable except the one-time
+    proposed -> confirmed|rejected decision (migrations/010's
+    communication_restrict_update trigger) -- same propose-then-confirm
+    shape as elektrica.rental_proposal."""
+    source_table: str
+    source_id: int
+    direction: CommunicationDirection
+    channel: CommunicationChannel
+    occurred_at: datetime
+    source_system: str
+    from_ref: Optional[str] = None
+    to_ref: Optional[str] = None
+    subject: Optional[str] = None
+    transcript_ref: Optional[str] = None
+    match_status: CommunicationMatchStatus = CommunicationMatchStatus.CONFIRMED
+    match_evidence: Optional[dict] = None
+    matched_by: Optional[str] = None
+    matched_at: Optional[datetime] = None
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+
+    def __post_init__(self):
+        # Mirrors communication_match_fields_together CHECK exactly:
+        # proposed rows carry no matched_by/matched_at yet; every other
+        # status requires both (set at write time by the caller/repository,
+        # not left to drift out of sync with match_status).
+        if self.match_status == CommunicationMatchStatus.PROPOSED:
+            if self.matched_by is not None or self.matched_at is not None:
+                raise ValueError(
+                    "match_status='proposed' rows must not carry matched_by/matched_at "
+                    "(platform.communication's communication_match_fields_together CHECK)."
+                )
+        else:
+            if self.matched_by is None or self.matched_at is None:
+                raise ValueError(
+                    f"match_status={self.match_status.value!r} requires both matched_by and "
+                    "matched_at (platform.communication's communication_match_fields_together CHECK)."
+                )
+
+
+# ---------------------------------------------------------------------------
 # Rental state sequence -- documentation mirror of
 # elektrica.rental_valid_next_states() (migrations/003, updated by 007).
 # The DB is the real enforcement (see repository.advance_rental_state());
@@ -486,3 +644,66 @@ def validate_rental_transition(current: RentalState, target: RentalState) -> Non
             f"Invalid rental state transition: {current.value} -> {target.value}. "
             f"Valid next states: {[s.value for s in valid]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# InsuranceCarrier + Adjuster -- mirrors platform.insurance_carrier /
+# platform.adjuster (migrations/013). Handoff §1.4 ("Canonical carrier
+# record... Shared between VLS and Elektrica Rentals") / §2.8 ("adjuster:
+# carrier_id, name, contact, notes"). No PLACEHOLDER caveat on the SHAPE
+# of these two tables (unlike elektrica.vehicle's enums) -- the handoff
+# gives their field list verbatim; only the historical *rows* (handoff
+# §2.9's import) remain export-blocked, not this schema. See migrations/
+# 013's own header comment for the full distinction.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InsuranceCarrier:
+    """Mirrors platform.insurance_carrier (migrations/013). `name` is the
+    canonical carrier name -- unique at the DB level, the "collapse to
+    canonical record" mechanism from handoff §2.9.2. Variant names belong
+    in `aliases`, not a second row."""
+    name: str
+    aliases: list[str] = None  # type: ignore[assignment]
+    fax: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    claims_mailing_address: Optional[str] = None
+    notes: Optional[str] = None
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+    def __post_init__(self):
+        if self.aliases is None:
+            self.aliases = []
+        name = (self.name or "").strip()
+        if not name:
+            raise ValueError("InsuranceCarrier.name cannot be blank")
+        self.name = name
+
+
+@dataclass
+class Adjuster:
+    """Mirrors platform.adjuster (migrations/013). Unique per
+    (carrier_id, name) at the DB level -- the same adjuster name CAN
+    recur at a different carrier (people move employers); that's not a
+    duplicate."""
+    carrier_id: int
+    name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+    def __post_init__(self):
+        name = (self.name or "").strip()
+        if not name:
+            raise ValueError("Adjuster.name cannot be blank")
+        self.name = name

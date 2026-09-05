@@ -18,6 +18,7 @@ neondb_owner, so there is no accidental bypass path from this layer.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
@@ -25,14 +26,25 @@ from typing import Optional
 import psycopg2.extras
 
 from app.models import (
+    Adjuster,
     ComplianceItem,
     ComplianceItemStatus,
     ComplianceItemType,
+    Communication,
+    CommunicationChannel,
+    CommunicationDirection,
+    CommunicationMatchStatus,
     Demand,
     DemandRecipientType,
     DemandStatus,
     DemandType,
+    Document,
+    DocumentTemplate,
+    DocumentTemplateFamily,
     EventSource,
+    InsuranceCarrier,
+    OutboundChannel,
+    OutboundLog,
     Payment,
     PaymentSource,
     ProposalKind,
@@ -104,6 +116,97 @@ def _renter_from_row(row) -> Renter:
         jotform_submission_ref=row["jotform_submission_ref"],
         drive_folder_ref=row["drive_folder_ref"],
         created_at=row["created_at"], created_by=row["created_by"],
+    )
+
+
+@dataclass
+class RenterIntakeResult:
+    """Return shape for match_or_create_and_link_renter() -- deliberately
+    NOT the same as Renter, because 'queued' is a real third outcome with
+    no linked elektrica.renter row yet (see that function's docstring)."""
+    match_status: str          # 'attached' | 'queued' | 'created'
+    person_id: int
+    queue_id: Optional[int] = None
+    renter: Optional[Renter] = None
+
+
+def match_or_create_and_link_renter(
+    cur, first_name: str, last_name: str, actor: str,
+    date_of_birth: Optional[date] = None,
+    email_normalized: Optional[str] = None,
+    phone_normalized: Optional[str] = None,
+    jotform_submission_ref: Optional[str] = None,
+    drive_folder_ref: Optional[str] = None,
+) -> RenterIntakeResult:
+    """The handoff §2.2 step-1 JotForm intake path, real end to end:
+    resolves identity via platform.match_or_create_person() (through the
+    platform_identity_service role, never a bespoke matching query --
+    per docs/BACKLOG.md's explicit instruction, repeated twice in that
+    file for staff and renter provisioning respectively) and, depending
+    on the result, links/creates the elektrica.renter row.
+
+    REQUIRES a privileged cursor (app.api.get_privileged_cursor(), NOT
+    get_cursor()) -- see that function's docstring for exactly why:
+    elektrica_app has no grant on or membership to
+    platform_identity_service, confirmed by direct query against real
+    staging Postgres this cycle (pg_auth_members had zero matching rows).
+
+    Sequencing within this one transaction:
+      1. SET ROLE platform_identity_service, call
+         platform.match_or_create_person() (SECURITY DEFINER -- runs as
+         its owner regardless of caller role, but EXECUTE itself is
+         still grant-checked against the CURRENT role, hence the SET
+         ROLE first).
+      2. RESET ROLE back to the connection's original login role before
+         touching elektrica.renter -- platform_identity_service has no
+         grants on the elektrica schema at all (by design, same
+         least-privilege split as every other role in this repo), so
+         the renter INSERT/SELECT below would fail under it.
+      3. Branch on match_status:
+         - 'attached' or 'created': the identity is resolved with
+           confidence -- link (or find-existing) the elektrica.renter
+           row via create_renter_for_existing_person(), same as the
+           already-existing POST /renters route.
+         - 'queued': per docs/BACKLOG.md's explicit rule, the caller
+           must NOT treat this person_id as linked yet. Deliberately
+           does NOT create an elektrica.renter row -- returns
+           renter=None and the real queue_id so the API layer can
+           surface it for human confirm-or-split. Whoever resolves the
+           queue entry (a future admin action, not built yet) is
+           responsible for creating the renter link once a human
+           confirms the match.
+    """
+    cur.execute("SET ROLE platform_identity_service")
+    try:
+        cur.execute(
+            """
+            SELECT * FROM platform.match_or_create_person(%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (first_name, last_name, date_of_birth, email_normalized,
+             phone_normalized, "elektrica", actor),
+        )
+        match_row = cur.fetchone()
+    finally:
+        cur.execute("RESET ROLE")
+
+    person_id = match_row["person_id"]
+    match_status = match_row["match_status"]
+    queue_id = match_row["queue_id"]
+
+    if match_status == "queued":
+        return RenterIntakeResult(
+            match_status=match_status, person_id=person_id,
+            queue_id=queue_id, renter=None,
+        )
+
+    renter = create_renter_for_existing_person(
+        cur, person_id, actor,
+        jotform_submission_ref=jotform_submission_ref,
+        drive_folder_ref=drive_folder_ref,
+    )
+    return RenterIntakeResult(
+        match_status=match_status, person_id=person_id,
+        queue_id=None, renter=renter,
     )
 
 
@@ -434,7 +537,7 @@ def create_demand(cur, demand: Demand, actor: str) -> Demand:
     cur.execute(
         """
         INSERT INTO elektrica.demand (
-            rental_id, demand_type, recipient_type, carrier_name, adjuster_name,
+            rental_id, demand_type, recipient_type, carrier_id, adjuster_id,
             amount, generated_document_id, sent_via, sent_at, status,
             prior_demand_id, created_by, updated_by
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -442,7 +545,7 @@ def create_demand(cur, demand: Demand, actor: str) -> Demand:
         """,
         (
             demand.rental_id, demand.demand_type.value, demand.recipient_type.value,
-            demand.carrier_name, demand.adjuster_name, demand.amount,
+            demand.carrier_id, demand.adjuster_id, demand.amount,
             demand.generated_document_id, demand.sent_via, demand.sent_at,
             demand.status.value, demand.prior_demand_id, actor, actor,
         ),
@@ -454,6 +557,22 @@ def get_demand(cur, demand_id: int) -> Optional[Demand]:
     cur.execute("SELECT * FROM elektrica.demand WHERE id = %s", (demand_id,))
     row = cur.fetchone()
     return _demand_from_row(row) if row else None
+
+
+def list_demands_for_rental(cur, rental_id: int) -> list[Demand]:
+    """Handoff §2.4/§2.8 dashboard gap: list every demand generated for a
+    given rental (a demand chain can have several rows via
+    prior_demand_id -- this returns all of them, oldest first, same
+    ordering convention as list_tolls_for_rental/list_rental_events).
+    No status filter -- draft and sent demands both belong in this view;
+    callers needing only one status filter client-side same as every
+    other list_* route in this repo (no query-param filtering exists
+    anywhere yet)."""
+    cur.execute(
+        "SELECT * FROM elektrica.demand WHERE rental_id = %s ORDER BY created_at",
+        (rental_id,),
+    )
+    return [_demand_from_row(r) for r in cur.fetchall()]
 
 
 def mark_demand_sent(cur, demand_id: int, sent_via: str, actor: str) -> Demand:
@@ -510,7 +629,7 @@ def _demand_from_row(row) -> Demand:
     return Demand(
         id=row["id"], rental_id=row["rental_id"], demand_type=DemandType(row["demand_type"]),
         recipient_type=DemandRecipientType(row["recipient_type"]),
-        carrier_name=row["carrier_name"], adjuster_name=row["adjuster_name"],
+        carrier_id=row["carrier_id"], adjuster_id=row["adjuster_id"],
         amount=row["amount"], generated_document_id=row["generated_document_id"],
         sent_via=row["sent_via"], sent_at=row["sent_at"], status=DemandStatus(row["status"]),
         prior_demand_id=row["prior_demand_id"],
@@ -581,9 +700,45 @@ def create_compliance_item(cur, item: ComplianceItem, actor: str) -> ComplianceI
     return _compliance_item_from_row(cur.fetchone())
 
 
+def get_compliance_item(cur, compliance_item_id: int) -> Optional[ComplianceItem]:
+    cur.execute(
+        "SELECT * FROM elektrica.compliance_item WHERE id = %s",
+        (compliance_item_id,),
+    )
+    row = cur.fetchone()
+    return _compliance_item_from_row(row) if row else None
+
+
 def list_compliance_items_expiring_soon(cur) -> list[dict]:
     cur.execute("SELECT * FROM elektrica.compliance_items_expiring_soon")
     return list(cur.fetchall())
+
+
+def update_compliance_item_status(
+    cur, compliance_item_id: int, status: ComplianceItemStatus,
+    related_document_id: Optional[int], actor: str,
+) -> ComplianceItem:
+    """Advances a compliance item's lifecycle (active -> expiring_soon ->
+    expired -> renewed). related_document_id is accepted here (not just
+    at creation) because the typical real transition -- 'renewed' -- is
+    exactly the moment a new document (the renewed license/registration/
+    policy) exists to link, per elektrica.compliance_item's own FK
+    (migrations/008). Pass the existing value through if a caller isn't
+    changing it; this function does not merge/preserve automatically,
+    same explicit-write discipline as advance_rental_state."""
+    cur.execute(
+        """
+        UPDATE elektrica.compliance_item
+        SET status = %s, related_document_id = %s, updated_at = now(), updated_by = %s
+        WHERE id = %s
+        RETURNING *
+        """,
+        (status.value, related_document_id, actor, compliance_item_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"No compliance_item with id={compliance_item_id}")
+    return _compliance_item_from_row(row)
 
 
 def _compliance_item_from_row(row) -> ComplianceItem:
@@ -637,6 +792,33 @@ def provision_staff_user_for_existing_person(
     return _staff_user_from_row(cur.fetchone())
 
 
+def set_staff_user_active(cur, google_email: str, active: bool, actor: str) -> StaffUser:
+    """Flip a staff member's active flag. *** REQUIRES A PRIVILEGED
+    CONNECTION *** -- same caveat as provision_staff_user_for_existing_person()
+    (elektrica_app has SELECT-only on staff_user, migration 011). Mirrors
+    Collision's set_staff_user_active() (same repo family, same
+    conventions) -- Elektrica has no staff_user_capability() function
+    (unlike Collision, whose owner/manager/receptionist role set needed
+    graduated permissions; Elektrica's role set is CONFIRMED FINAL as a
+    flat owner/staff split with no further granularity per Jed, migration
+    011's own header), so there is no capability-lookup counterpart to
+    build here -- active/inactive plus the role enum is the whole
+    permission surface for this business, not a gap."""
+    cur.execute(
+        """
+        UPDATE elektrica.staff_user
+        SET active = %s, updated_at = now(), updated_by = %s
+        WHERE google_email = %s
+        RETURNING *
+        """,
+        (active, actor, google_email.strip().lower()),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"No staff_user with google_email={google_email!r}")
+    return _staff_user_from_row(row)
+
+
 def _staff_user_from_row(row) -> StaffUser:
     return StaffUser(
         id=row["id"], person_id=row["person_id"], role=StaffRole(row["role"]),
@@ -645,3 +827,473 @@ def _staff_user_from_row(row) -> StaffUser:
         created_at=row["created_at"], created_by=row["created_by"],
         updated_at=row["updated_at"], updated_by=row["updated_by"],
     )
+
+
+# ---------------------------------------------------------------------------
+# platform.document_template / platform.document / platform.outbound_log
+# (migrations/005, relocated by migrations/009) -- shared document
+# generator storage layer, handoff §1.3. First app-layer code for these
+# tables; they existed schema-only since 2026-09-03/04.
+# ---------------------------------------------------------------------------
+
+def get_active_document_template(cur, family: DocumentTemplateFamily) -> Optional[DocumentTemplate]:
+    """Handoff §1.3: 'Templates are versioned; a generated document
+    records the template version used.' Callers generating a document
+    look up the currently-active version for a family, then pass its id
+    into create_document() -- this function does not itself write
+    anything."""
+    cur.execute(
+        "SELECT * FROM platform.document_template WHERE family = %s AND is_active = true",
+        (family.value,),
+    )
+    row = cur.fetchone()
+    return _document_template_from_row(row) if row else None
+
+
+def create_document_template(cur, template: DocumentTemplate, actor: str) -> DocumentTemplate:
+    cur.execute(
+        """
+        INSERT INTO platform.document_template (family, version, template_ref, is_active, created_by)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (template.family.value, template.version, template.template_ref, template.is_active, actor),
+    )
+    return _document_template_from_row(cur.fetchone())
+
+
+def _document_template_from_row(row) -> DocumentTemplate:
+    return DocumentTemplate(
+        id=row["id"], family=DocumentTemplateFamily(row["family"]), version=row["version"],
+        template_ref=row["template_ref"], is_active=row["is_active"],
+        created_at=row["created_at"], created_by=row["created_by"],
+    )
+
+
+def create_document(cur, document: Document, actor: str) -> Document:
+    """Writes the append-only generation-log row (platform.document is
+    immutable from creation, migrations/005 -- DELETE/UPDATE both forbid
+    at the DB layer). merge_data is frozen at generation time per handoff
+    §1.3's reproducibility requirement; this function does not itself
+    render a PDF -- that is future template-rendering work, out of scope
+    for the data layer."""
+    cur.execute(
+        """
+        INSERT INTO platform.document (
+            template_id, source_table, source_id, merge_data, attachments,
+            output_ref, output_hash, generated_by
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            document.template_id, document.source_table, document.source_id,
+            _json(document.merge_data), _json(document.attachments),
+            document.output_ref, document.output_hash, actor,
+        ),
+    )
+    return _document_from_row(cur.fetchone())
+
+
+def get_document(cur, document_id: int) -> Optional[Document]:
+    cur.execute("SELECT * FROM platform.document WHERE id = %s", (document_id,))
+    row = cur.fetchone()
+    return _document_from_row(row) if row else None
+
+
+def list_documents_never_sent(cur) -> list[dict]:
+    """Reads platform.documents_never_sent (migrations/005/009) --
+    handoff §1.3's exact phrase: 'generated but never sent' is visible."""
+    cur.execute("SELECT * FROM platform.documents_never_sent")
+    return list(cur.fetchall())
+
+
+def _document_from_row(row) -> Document:
+    return Document(
+        id=row["id"], template_id=row["template_id"],
+        source_table=row["source_table"], source_id=row["source_id"],
+        merge_data=row["merge_data"], attachments=row["attachments"],
+        output_ref=row["output_ref"], output_hash=row["output_hash"],
+        generated_at=row["generated_at"], generated_by=row["generated_by"],
+    )
+
+
+def create_outbound_log(cur, log: OutboundLog, actor: str) -> OutboundLog:
+    """Records a send as its OWN append-only row -- deliberately separate
+    from create_document() (handoff §1.3: 'Outbound delivery ... is a
+    separate step with its own log row')."""
+    cur.execute(
+        """
+        INSERT INTO platform.outbound_log (
+            document_id, channel, recipient, delivery_confirmation_ref, sent_by
+        ) VALUES (%s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (log.document_id, log.channel.value, log.recipient, log.delivery_confirmation_ref, actor),
+    )
+    return _outbound_log_from_row(cur.fetchone())
+
+
+def list_outbound_log_for_document(cur, document_id: int) -> list[OutboundLog]:
+    cur.execute(
+        "SELECT * FROM platform.outbound_log WHERE document_id = %s ORDER BY sent_at",
+        (document_id,),
+    )
+    return [_outbound_log_from_row(r) for r in cur.fetchall()]
+
+
+def _outbound_log_from_row(row) -> OutboundLog:
+    return OutboundLog(
+        id=row["id"], document_id=row["document_id"], channel=OutboundChannel(row["channel"]),
+        recipient=row["recipient"], delivery_confirmation_ref=row["delivery_confirmation_ref"],
+        sent_at=row["sent_at"], sent_by=row["sent_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# platform.communication (migrations/010) -- shared comms timeline,
+# handoff §1.5/§2.6. First app-layer code for this table; schema-only
+# since the 2026-09-04 cron cycle that built migration 010.
+# ---------------------------------------------------------------------------
+
+def create_communication(cur, comm: Communication, actor: str) -> Communication:
+    """Writes a communication row. Callers deciding an inbound match is
+    correct/incorrect use confirm_communication_match()/
+    reject_communication_match() below, NOT a second call to this
+    function -- platform.communication only allows that one follow-up
+    UPDATE per row (migrations/010's communication_restrict_update
+    trigger), matching elektrica.rental_proposal's propose-then-confirm
+    shape exactly."""
+    cur.execute(
+        """
+        INSERT INTO platform.communication (
+            source_table, source_id, direction, channel, occurred_at,
+            from_ref, to_ref, subject, transcript_ref, source_system,
+            match_status, match_evidence, matched_by, matched_at, created_by
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            comm.source_table, comm.source_id, comm.direction.value, comm.channel.value,
+            comm.occurred_at, comm.from_ref, comm.to_ref, comm.subject, comm.transcript_ref,
+            comm.source_system, comm.match_status.value, _json(comm.match_evidence),
+            comm.matched_by, comm.matched_at, actor,
+        ),
+    )
+    return _communication_from_row(cur.fetchone())
+
+
+def list_communications_for_source(cur, source_table: str, source_id: int) -> list[Communication]:
+    """Backs a rental's (or future collision.job's) communication timeline
+    tab -- ordered newest-first, matching migrations/010's own index."""
+    cur.execute(
+        """
+        SELECT * FROM platform.communication
+        WHERE source_table = %s AND source_id = %s
+        ORDER BY occurred_at DESC
+        """,
+        (source_table, source_id),
+    )
+    return [_communication_from_row(r) for r in cur.fetchall()]
+
+
+def list_pending_communication_matches(cur) -> list[dict]:
+    """Reads platform.pending_communication_matches (migrations/010) --
+    the confirm-or-reject queue for inbound claim-number auto-matches,
+    handoff §2.6: 'attached as a proposal pending confirmation'."""
+    cur.execute("SELECT * FROM platform.pending_communication_matches")
+    return list(cur.fetchall())
+
+
+def _decide_communication_match(cur, communication_id: int, new_status: CommunicationMatchStatus, actor: str) -> Communication:
+    cur.execute(
+        """
+        UPDATE platform.communication
+        SET match_status = %s, matched_by = %s, matched_at = now()
+        WHERE id = %s AND match_status = 'proposed'
+        RETURNING *
+        """,
+        (new_status.value, actor, communication_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(
+            f"No proposed communication with id={communication_id} "
+            "(either missing or already decided -- migrations/010's trigger permits only one decision)."
+        )
+    return _communication_from_row(row)
+
+
+def confirm_communication_match(cur, communication_id: int, actor: str) -> Communication:
+    """Human confirms a proposed inbound-email claim-number match is
+    correct. Handoff §2.6: 'wrong-claim attachment is worse than no
+    attachment' -- this is the human gate that decision requires."""
+    return _decide_communication_match(cur, communication_id, CommunicationMatchStatus.CONFIRMED, actor)
+
+
+def reject_communication_match(cur, communication_id: int, actor: str) -> Communication:
+    """Human reviews a proposed match and it was wrong."""
+    return _decide_communication_match(cur, communication_id, CommunicationMatchStatus.REJECTED, actor)
+
+
+def _communication_from_row(row) -> Communication:
+    return Communication(
+        id=row["id"], source_table=row["source_table"], source_id=row["source_id"],
+        direction=CommunicationDirection(row["direction"]), channel=CommunicationChannel(row["channel"]),
+        occurred_at=row["occurred_at"], from_ref=row["from_ref"], to_ref=row["to_ref"],
+        subject=row["subject"], transcript_ref=row["transcript_ref"], source_system=row["source_system"],
+        match_status=CommunicationMatchStatus(row["match_status"]), match_evidence=row["match_evidence"],
+        matched_by=row["matched_by"], matched_at=row["matched_at"],
+        created_at=row["created_at"], created_by=row["created_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# InsuranceCarrier + Adjuster -- platform.insurance_carrier /
+# platform.adjuster (migrations/013), handoff §1.4/§2.8. First app-layer
+# code for these tables; existed schema-only since this cron cycle. No
+# DELETE path exposed (migration 013's own grants omit DELETE by design
+# -- carrier/adjuster records get corrected, never removed).
+# ---------------------------------------------------------------------------
+
+def create_insurance_carrier(cur, carrier: InsuranceCarrier, actor: str) -> InsuranceCarrier:
+    cur.execute(
+        """
+        INSERT INTO platform.insurance_carrier
+            (name, aliases, fax, email, phone, claims_mailing_address, notes, created_by, updated_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (carrier.name, carrier.aliases, carrier.fax, carrier.email, carrier.phone,
+         carrier.claims_mailing_address, carrier.notes, actor, actor),
+    )
+    return _insurance_carrier_from_row(cur.fetchone())
+
+
+def get_insurance_carrier(cur, carrier_id: int) -> Optional[InsuranceCarrier]:
+    cur.execute("SELECT * FROM platform.insurance_carrier WHERE id = %s", (carrier_id,))
+    row = cur.fetchone()
+    return _insurance_carrier_from_row(row) if row else None
+
+
+def find_insurance_carrier_by_name_or_alias(cur, name: str) -> Optional[InsuranceCarrier]:
+    """Case-insensitive lookup against the canonical name OR any alias --
+    the actual "collapse to canonical record" mechanism handoff §2.9.2
+    describes for the eventual historical import (still export-blocked,
+    see docs/OVERNIGHT_DECISIONS.md), and also useful today for any
+    caller trying to avoid creating a duplicate carrier under a slightly
+    different name."""
+    cur.execute(
+        """
+        SELECT * FROM platform.insurance_carrier
+        WHERE lower(name) = lower(%s)
+           OR EXISTS (SELECT 1 FROM unnest(aliases) a WHERE lower(a) = lower(%s))
+        """,
+        (name, name),
+    )
+    row = cur.fetchone()
+    return _insurance_carrier_from_row(row) if row else None
+
+
+def list_insurance_carriers(cur) -> list[InsuranceCarrier]:
+    cur.execute("SELECT * FROM platform.insurance_carrier ORDER BY name")
+    return [_insurance_carrier_from_row(r) for r in cur.fetchall()]
+
+
+def add_insurance_carrier_alias(cur, carrier_id: int, alias: str, actor: str) -> InsuranceCarrier:
+    """Appends an alias if not already present (case-insensitive dedupe
+    at the app layer -- the DB column is a plain TEXT[], no uniqueness
+    constraint on array contents)."""
+    cur.execute(
+        """
+        UPDATE platform.insurance_carrier
+        SET aliases = CASE
+                WHEN EXISTS (SELECT 1 FROM unnest(aliases) a WHERE lower(a) = lower(%s))
+                THEN aliases
+                ELSE array_append(aliases, %s)
+            END,
+            updated_by = %s
+        WHERE id = %s
+        RETURNING *
+        """,
+        (alias, alias, actor, carrier_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"No insurance_carrier with id={carrier_id}")
+    return _insurance_carrier_from_row(row)
+
+
+def _insurance_carrier_from_row(row) -> InsuranceCarrier:
+    return InsuranceCarrier(
+        id=row["id"], name=row["name"], aliases=list(row["aliases"]) if row["aliases"] is not None else [],
+        fax=row["fax"], email=row["email"], phone=row["phone"],
+        claims_mailing_address=row["claims_mailing_address"], notes=row["notes"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+        created_by=row["created_by"], updated_by=row["updated_by"],
+    )
+
+
+def create_adjuster(cur, adjuster: Adjuster, actor: str) -> Adjuster:
+    cur.execute(
+        """
+        INSERT INTO platform.adjuster (carrier_id, name, phone, email, notes, created_by, updated_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (adjuster.carrier_id, adjuster.name, adjuster.phone, adjuster.email, adjuster.notes, actor, actor),
+    )
+    return _adjuster_from_row(cur.fetchone())
+
+
+def get_adjuster(cur, adjuster_id: int) -> Optional[Adjuster]:
+    cur.execute("SELECT * FROM platform.adjuster WHERE id = %s", (adjuster_id,))
+    row = cur.fetchone()
+    return _adjuster_from_row(row) if row else None
+
+
+def list_adjusters_for_carrier(cur, carrier_id: int) -> list[Adjuster]:
+    cur.execute("SELECT * FROM platform.adjuster WHERE carrier_id = %s ORDER BY name", (carrier_id,))
+    return [_adjuster_from_row(r) for r in cur.fetchall()]
+
+
+def _adjuster_from_row(row) -> Adjuster:
+    return Adjuster(
+        id=row["id"], carrier_id=row["carrier_id"], name=row["name"],
+        phone=row["phone"], email=row["email"], notes=row["notes"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+        created_by=row["created_by"], updated_by=row["updated_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# platform.person_match_queue -- confirm-or-split admin action, closing the
+# gap flagged since the 2026-09-05 renter-intake cycle: match_or_create_
+# person()'s 'queued' outcome (close name+DOB match, no exact email/phone)
+# had no resolution path -- queue_id=2 sat pending across multiple cycles
+# because no admin action existed to act on it. This is that action.
+#
+# SCOPE BOUNDARY (hard, not a style choice): platform.person_match_queue is
+# a genuinely shared platform table -- source_project can be 'elektrica',
+# 'collision', OR 'vls'. This bot has zero relationship to VLS/Jocasta and
+# must never read or act on VLS client-matter data (attorney-client
+# privilege). Every function below explicitly filters out / refuses
+# source_project='vls' rows rather than silently being generic over all
+# three -- this is enforced in code, not just left to caller discipline.
+#
+# REQUIRES a privileged cursor (app.api.get_privileged_cursor()), same
+# reasoning as match_or_create_and_link_renter(): elektrica_app has ZERO
+# grants (not even SELECT) on platform.person_match_queue, confirmed by
+# direct query against real staging Postgres this cycle -- only
+# neondb_owner and platform_identity_service have any grant on this table.
+# ---------------------------------------------------------------------------
+
+def list_pending_person_match_queue_items(cur) -> list[dict]:
+    """Lists pending queue entries for THIS bot's businesses only --
+    excludes source_project='vls' at the query level (not just at display
+    time) per this repo's absolute VLS boundary. Elektrica's own admin
+    surface has no legitimate reason to ever enumerate a VLS row, so it
+    is never fetched, not merely filtered after the fact."""
+    cur.execute(
+        """
+        SELECT * FROM platform.person_match_queue
+        WHERE status = 'pending' AND source_project <> 'vls'
+        ORDER BY submitted_at ASC
+        """
+    )
+    return list(cur.fetchall())
+
+
+def resolve_person_match_queue(
+    cur, queue_id: int, decision: str, actor: str,
+) -> dict:
+    """Human confirm-or-split action on one platform.person_match_queue
+    row. decision must be 'confirmed_match' (the queued candidate really
+    IS the same person -- resulting_person_id = candidate_person_id, no
+    new platform.person row) or 'confirmed_split' (it is a DIFFERENT
+    person who happens to share last_name+date_of_birth -- creates a
+    brand-new platform.person row from the queue's own submitted name/
+    DOB/email/phone, resulting_person_id = that new row).
+
+    Refuses (ValueError) a source_project='vls' row outright -- this bot
+    must never resolve a VLS-domain identity match, full stop, regardless
+    of who called it or why.
+
+    If source_project == 'elektrica', also links (or finds-existing) the
+    resulting person as an elektrica.renter -- the same
+    create_renter_for_existing_person() path POST /renters/intake uses,
+    so a queued renter that finally gets resolved ends up in exactly the
+    same state a clean 'attached'/'created' intake would have produced.
+    Does NOT do the equivalent for source_project == 'collision' -- that
+    business's own renter-equivalent linking is that repo's
+    responsibility, not this one's, per this bot's own scope boundary
+    (Elektrica-only application code; platform.* is shared data, not
+    shared app logic).
+    """
+    if decision not in ("confirmed_match", "confirmed_split"):
+        raise ValueError(
+            f"decision={decision!r} must be 'confirmed_match' or 'confirmed_split'"
+        )
+
+    cur.execute(
+        "SELECT * FROM platform.person_match_queue WHERE id = %s", (queue_id,)
+    )
+    queue_row = cur.fetchone()
+    if queue_row is None:
+        raise ValueError(f"No person_match_queue row with id={queue_id}")
+    if queue_row["source_project"] == "vls":
+        raise ValueError(
+            f"person_match_queue id={queue_id} is source_project='vls' -- "
+            "this bot has no relationship to VLS/Jocasta and refuses to "
+            "act on VLS-domain identity matches (attorney-client "
+            "privilege boundary, absolute, not a style preference)."
+        )
+    if queue_row["status"] != "pending":
+        raise ValueError(
+            f"person_match_queue id={queue_id} already resolved "
+            f"(status={queue_row['status']!r}, resolved_by={queue_row['resolved_by']!r})"
+        )
+
+    if decision == "confirmed_match":
+        resulting_person_id = queue_row["candidate_person_id"]
+    else:  # confirmed_split
+        cur.execute(
+            """
+            INSERT INTO platform.person
+                (first_name, last_name, date_of_birth, email_normalized, phone_normalized, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                queue_row["first_name"], queue_row["last_name"], queue_row["date_of_birth"],
+                queue_row["email_normalized"], queue_row["phone_normalized"], actor,
+            ),
+        )
+        resulting_person_id = cur.fetchone()["id"]
+
+    cur.execute(
+        """
+        UPDATE platform.person_match_queue
+        SET status = %s, resolved_at = now(), resolved_by = %s, resulting_person_id = %s
+        WHERE id = %s AND status = 'pending'
+        RETURNING *
+        """,
+        (decision, actor, resulting_person_id, queue_id),
+    )
+    resolved_row = cur.fetchone()
+    if resolved_row is None:
+        raise ValueError(
+            f"person_match_queue id={queue_id} was resolved concurrently by another caller "
+            "(status changed between this function's own SELECT and UPDATE)."
+        )
+
+    renter = None
+    if resolved_row["source_project"] == "elektrica":
+        renter = create_renter_for_existing_person(cur, resulting_person_id, actor)
+
+    return {
+        "queue_id": queue_id,
+        "decision": decision,
+        "resulting_person_id": resulting_person_id,
+        "source_project": resolved_row["source_project"],
+        "renter": renter,
+    }

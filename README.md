@@ -74,12 +74,17 @@ app code (`app/`) now exists on top of it, no auth, never deployed — see
   implements the handoff's literal "generated but never sent" visibility
   requirement. `elektrica_app` is the only real caller today; `vls_app`
   gets granted access when VLS has its own first real caller, not before.
-- **`elektrica.demand` + `elektrica.comparable_set`** (`migrations/006_elektrica_demand.sql`)
+- **`elektrica.demand` + `elektrica.comparable_set`** (`migrations/006_elektrica_demand.sql`,
+  carrier/adjuster identity FK-wired by `migrations/014_elektrica_demand_carrier_fk.sql`)
   — the demand object (handoff §2.3) and its frozen market-comparable
   snapshot (§2.8). `demand_type` and the `prior_demand_id`
   shortfall-pre-fill chain are handoff-literal; `demand.status`'s value
-  list and `carrier_name`/`adjuster_name` are placeholder (no
-  insurance_carrier/adjuster tables yet). `comparable_set` is immutable
+  list is still placeholder. `carrier_id`/`adjuster_id` reference
+  `platform.insurance_carrier`/`platform.adjuster` by id (migration 014
+  replaced the original placeholder `carrier_name`/`adjuster_name`
+  free-text columns once those tables existed) — a trigger enforces that
+  `adjuster_id`, if set, belongs to the same carrier as `carrier_id`.
+  `comparable_set` is immutable
   from creation. `aging_demands` view implements the "45 days with no
   offer" aging signal. Staging-only.
 - **JP litigation wiring** (`migrations/007_elektrica_jp_litigation.sql`)
