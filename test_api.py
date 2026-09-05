@@ -8,6 +8,7 @@ Run: python test_api.py
 """
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import patch
@@ -213,34 +214,78 @@ def test_get_blocked_rentals():
 
 def test_create_proposal():
     with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
-         patch("app.api.repo.create_rental_proposal", return_value=_sample_proposal()):
+         patch("app.api.repo.create_rental_proposal", return_value=_sample_proposal()), \
+         patch.dict(os.environ, {"ELEKTRICA_BOT_API_KEY": "test-bot-key"}):
         r = client.post(
             "/rentals/1/proposals",
             json={
                 "kind": "return", "proposed_values": {"return_date": "2026-09-10"},
                 "source_system": "geofence_email", "observed_at": "2026-09-10T14:30:00",
             },
+            headers={"X-Api-Key": "test-bot-key"},
         )
     check("test_create_proposal_status", r.status_code == 200, r.text)
     check("test_create_proposal_body", r.json()["status"] == "pending")
 
 
 def test_create_proposal_rental_not_found():
-    with patch("app.api.repo.get_rental", return_value=None):
+    with patch("app.api.repo.get_rental", return_value=None), \
+         patch.dict(os.environ, {"ELEKTRICA_BOT_API_KEY": "test-bot-key"}):
         r = client.post(
             "/rentals/999/proposals",
             json={"kind": "return", "proposed_values": {}, "source_system": "bot", "observed_at": "2026-09-10T14:30:00"},
+            headers={"X-Api-Key": "test-bot-key"},
         )
     check("test_create_proposal_rental_not_found", r.status_code == 404)
 
 
 def test_create_proposal_bad_kind():
-    with patch("app.api.repo.get_rental", return_value=_sample_rental()):
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch.dict(os.environ, {"ELEKTRICA_BOT_API_KEY": "test-bot-key"}):
         r = client.post(
             "/rentals/1/proposals",
             json={"kind": "not_a_kind", "proposed_values": {}, "source_system": "bot", "observed_at": "2026-09-10T14:30:00"},
+            headers={"X-Api-Key": "test-bot-key"},
         )
     check("test_create_proposal_bad_kind", r.status_code == 400, r.text)
+
+
+def test_create_proposal_no_key_configured_returns_503():
+    """Handoff §1.7: API key or nothing -- if the server has no key
+    configured, the endpoint must refuse to serve (fail closed), not
+    silently accept the write."""
+    env_without_key = {k: v for k, v in os.environ.items() if k != "ELEKTRICA_BOT_API_KEY"}
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch.dict(os.environ, env_without_key, clear=True):
+        r = client.post(
+            "/rentals/1/proposals",
+            json={"kind": "return", "proposed_values": {}, "source_system": "bot", "observed_at": "2026-09-10T14:30:00"},
+            headers={"X-Api-Key": "anything"},
+        )
+    check("test_create_proposal_no_key_configured_returns_503", r.status_code == 503, r.text)
+
+
+def test_create_proposal_missing_header_returns_401():
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch.dict(os.environ, {"ELEKTRICA_BOT_API_KEY": "test-bot-key"}):
+        r = client.post(
+            "/rentals/1/proposals",
+            json={"kind": "return", "proposed_values": {}, "source_system": "bot", "observed_at": "2026-09-10T14:30:00"},
+        )
+    check("test_create_proposal_missing_header_returns_401", r.status_code == 401, r.text)
+
+
+def test_create_proposal_wrong_key_returns_401():
+    """No bypass allowlist, no localhost trust -- a wrong key is rejected
+    exactly like a missing one."""
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch.dict(os.environ, {"ELEKTRICA_BOT_API_KEY": "test-bot-key"}):
+        r = client.post(
+            "/rentals/1/proposals",
+            json={"kind": "return", "proposed_values": {}, "source_system": "bot", "observed_at": "2026-09-10T14:30:00"},
+            headers={"X-Api-Key": "wrong-key"},
+        )
+    check("test_create_proposal_wrong_key_returns_401", r.status_code == 401, r.text)
 
 
 def test_get_pending_proposals():
@@ -618,6 +663,8 @@ if __name__ == "__main__":
         test_transition_rental_db_rejection_returns_400_not_500,
         test_get_blocked_rentals,
         test_create_proposal, test_create_proposal_rental_not_found, test_create_proposal_bad_kind,
+        test_create_proposal_no_key_configured_returns_503,
+        test_create_proposal_missing_header_returns_401, test_create_proposal_wrong_key_returns_401,
         test_get_pending_proposals, test_decide_proposal_accept, test_decide_proposal_bad_status,
         test_create_demand, test_create_demand_carrier_without_name_returns_400,
         test_mark_demand_sent, test_get_aging_demands,

@@ -30,23 +30,26 @@ by a human on demand until a real deploy decision is made -- same
 standing rule as every other draft-and-hold external-facing surface in
 this build.
 
-OPEN ITEM (flagged here, not decided): the bot-write proposal endpoint
-below has no API-key check. Handoff §1.7 requires "a scoped API key
-against explicitly proposal-shaped endpoints ... no bypass allowlist,
-no localhost trust, API key or nothing." This endpoint is currently
-reachable by anything that can reach the (unexposed, local-only)
-process -- fine for this build phase (no deploy exists), NOT fine once
-any real deploy is considered. Needs a real auth layer before that day.
+RESOLVED (2026-09-04, later cron cycle): the bot-write proposal endpoint
+now enforces a scoped API key -- see require_bot_api_key() below. Matches
+handoff §1.7 literally: "no bypass allowlist, no localhost trust, API key
+or nothing." Fails CLOSED, not open: if ELEKTRICA_BOT_API_KEY is unset,
+the endpoint returns 503 (disabled) rather than silently accepting any
+request. Only the one explicitly bot-shaped endpoint gets this dependency
+-- every other route in this file still has no auth, which remains a
+separate, larger, standing gap (a real session/staff-auth layer for
+human-operated routes) that this change does not claim to resolve.
 """
 from __future__ import annotations
 
+import hmac
 import os
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
 import psycopg2.errors
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from app import db
@@ -107,6 +110,47 @@ def get_cursor():
     env_var = get_db_env_var()
     with db.cursor(env_var, set_role=get_db_set_role()) as cur:
         yield cur
+
+
+def get_bot_api_key_env_var() -> str:
+    return os.environ.get("ELEKTRICA_BOT_API_KEY_ENV_VAR", "ELEKTRICA_BOT_API_KEY")
+
+
+def require_bot_api_key(x_api_key: "str | None" = Header(default=None)):
+    """Dependency for the ONE bot-write endpoint that handoff §1.7 requires
+    to be gated: POST /rentals/{id}/proposals. Deliberately fails CLOSED:
+
+      - No key configured server-side (ELEKTRICA_BOT_API_KEY unset) -> 503.
+        This is a "auth not turned on yet" state, not "auth open to all" --
+        the endpoint refuses to serve rather than silently accepting every
+        caller, so an operator can never mistake "forgot to set the env
+        var" for "intentionally open".
+      - Caller sent no X-Api-Key header, or the wrong one -> 401.
+      - No bypass allowlist, no localhost trust, no dev-mode skip -- every
+        request goes through the same check regardless of source, per the
+        handoff's literal wording ("API key or nothing").
+
+    Comparison uses hmac.compare_digest (constant-time) rather than `==`
+    to avoid a timing side-channel on the key comparison itself.
+
+    This intentionally does NOT become a general auth/session layer for
+    the rest of app/api.py's routes (staff/human-operated routes still
+    have none) -- that is a bigger, separate decision (real session
+    identity tied to elektrica.staff_user) that this task doesn't decide.
+    """
+    configured = os.environ.get(get_bot_api_key_env_var())
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Bot proposal endpoint disabled: environment variable "
+                f"{get_bot_api_key_env_var()!r} is not set. Refusing to "
+                "accept unauthenticated bot writes rather than silently "
+                "allowing them."
+            ),
+        )
+    if not x_api_key or not hmac.compare_digest(x_api_key, configured):
+        raise HTTPException(status_code=401, detail="Missing or invalid X-Api-Key header.")
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +572,7 @@ def transition_rental(rental_id: int, body: TransitionRequest, cur=Depends(get_c
 
 # --- Rental proposals (bot interface, handoff §1.7) -------------------------
 
-@app.post("/rentals/{rental_id}/proposals", response_model=ProposalOut)
+@app.post("/rentals/{rental_id}/proposals", response_model=ProposalOut, dependencies=[Depends(require_bot_api_key)])
 def create_proposal(rental_id: int, body: ProposalIn, cur=Depends(get_cursor)):
     if repo.get_rental(cur, rental_id) is None:
         raise HTTPException(status_code=404, detail=f"No rental with id={rental_id}")
