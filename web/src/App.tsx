@@ -6,6 +6,7 @@ import VehicleDetailPage from './pages/VehicleDetailPage';
 import RentalListPage from './pages/RentalListPage';
 import RentalDetailPage from './pages/RentalDetailPage';
 import DemandsPage from './pages/DemandsPage';
+import CarriersPage from './pages/CarriersPage';
 import TollsPage from './pages/TollsPage';
 import PaymentsPage from './pages/PaymentsPage';
 import CompliancePage from './pages/CompliancePage';
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
   { to: '/', label: 'Fleet' },
   { to: '/rentals', label: 'Rentals' },
   { to: '/demands', label: 'Demands' },
+  { to: '/carriers', label: 'Carriers' },
   { to: '/tolls', label: 'Tolls' },
   { to: '/payments', label: 'Payments' },
   { to: '/compliance', label: 'Compliance' },
@@ -70,6 +72,7 @@ function AppShell() {
           <Route path="/rentals" element={<RentalListPage />} />
           <Route path="/rentals/:id" element={<RentalDetailPage />} />
           <Route path="/demands" element={<DemandsPage />} />
+          <Route path="/carriers" element={<CarriersPage />} />
           <Route path="/tolls" element={<TollsPage />} />
           <Route path="/payments" element={<PaymentsPage />} />
           <Route path="/compliance" element={<CompliancePage />} />

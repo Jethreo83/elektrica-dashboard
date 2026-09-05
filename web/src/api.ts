@@ -198,6 +198,34 @@ export interface Adjuster {
   notes: string | null;
 }
 
+export interface InsurerPayment {
+  id: number;
+  demand_id: number;
+  rental_id: number;
+  carrier_id: number;
+  adjuster_id: number | null;
+  claim_ref: string | null;
+  vehicle_class: string | null;
+  rental_start_date: string | null;
+  rental_end_date: string | null;
+  market_rate_at_time: string | null;
+  amount_demanded: string;
+  amount_paid: string;
+  days_to_resolve: number | null;
+  resolved_at: string;
+  source: string;
+  source_ref: string | null;
+  frozen: boolean;
+}
+
+export interface CarrierMarketRateExhibit {
+  carrier_id: number;
+  claim_count: number;
+  avg_amount_demanded: string | null;
+  avg_amount_paid: string | null;
+  avg_market_rate: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // bigint-as-string coercion helpers -- run Number() on every id field
 // returned from the API before this frontend touches it.
@@ -371,6 +399,15 @@ export const api = {
   }) => apiFetch<Demand>(`/rentals/${rentalId}/demands`, { method: 'POST', body: JSON.stringify(body) }).then(coerceDemand),
   markDemandSent: (demandId: number, body: { sent_via: string; actor: string }) =>
     apiFetch<Demand>(`/demands/${demandId}/mark-sent`, { method: 'POST', body: JSON.stringify(body) }).then(coerceDemand),
+  advanceDemandStatus: (demandId: number, body: { target_status: DemandStatus; actor: string }) =>
+    // POST /demands/{id}/status (app/api.py) -- covers every transition
+    // past mark-sent: sent -> negotiating -> no_offer -> accepted ->
+    // resolved, plus skip-ahead-to-resolved. This is the real,
+    // dashboard-reachable trigger point for elektrica.insurer_payment's
+    // auto-population (migration 016) -- see docs/BACKLOG.md's
+    // "no HTTP route to resolve a demand" entry (resolved) for why this
+    // wiring matters beyond just UI completeness.
+    apiFetch<Demand>(`/demands/${demandId}/status`, { method: 'POST', body: JSON.stringify(body) }).then(coerceDemand),
   agingDemands: () => apiFetch<any[]>('/demands/aging'),
 
   // Tolls
@@ -412,4 +449,20 @@ export const api = {
   listInsuranceCarriers: () => apiFetch<InsuranceCarrier[]>('/insurance-carriers').then((rows) => rows.map(coerceCarrier)),
   listAdjustersForCarrier: (carrierId: number) =>
     apiFetch<Adjuster[]>(`/insurance-carriers/${carrierId}/adjusters`).then((rows) => rows.map(coerceAdjuster)),
+  createInsuranceCarrier: (body: {
+    name: string; aliases?: string[]; fax?: string; email?: string; phone?: string;
+    claims_mailing_address?: string; notes?: string; actor: string;
+  }) => apiFetch<InsuranceCarrier>('/insurance-carriers', { method: 'POST', body: JSON.stringify(body) }).then(coerceCarrier),
+  createAdjuster: (carrierId: number, body: { name: string; phone?: string; email?: string; notes?: string; actor: string }) =>
+    apiFetch<Adjuster>(`/insurance-carriers/${carrierId}/adjusters`, { method: 'POST', body: JSON.stringify(body) }).then(coerceAdjuster),
+
+  // Insurer-payment tracker & market-rate exhibit (handoff §2.8) --
+  // read-only from the API's own point of view: 'system' rows are
+  // created exclusively by the migration-016 trigger when a
+  // carrier-recipient demand resolves (see api.advanceDemandStatus
+  // above), never POSTed directly by this frontend.
+  getCarrierInsurerPayments: (carrierId: number) =>
+    apiFetch<InsurerPayment[]>(`/insurance-carriers/${carrierId}/insurer-payments`),
+  getCarrierMarketRateExhibit: (carrierId: number) =>
+    apiFetch<CarrierMarketRateExhibit>(`/insurance-carriers/${carrierId}/market-rate-exhibit`),
 };

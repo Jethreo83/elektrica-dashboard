@@ -7,7 +7,49 @@ from scratch or, worse, do it differently by accident.
 
 ---
 
-## RESOLVED 2026-09-05 (cron cycle) — platform.person_match_queue confirm-or-split admin action built
+## RESOLVED 2026-09-05 (cron cycle, later still) — POST /demands/{id}/status live-verified against real staging; frontend gap it exposed closed
+
+**What:** the entry directly above (`RESOLVED ... elektrica.demand HTTP
+route to reach 'resolved' built`) explicitly deferred live-verification
+against real staging (stale/foreign `DATABASE_URL` in that cycle's
+shell) and never checked whether the frontend actually exposed a button
+for it. Both closed this cycle:
+
+- Live HTTP round-trip against real staging (resolved the real
+  `DATABASE_URL` via the `neon` CLI + Neon API's `reveal_password`,
+  confirmed genuinely staging not production first): `sent ->
+  negotiating -> resolved` on a real carrier-recipient demand,
+  `elektrica.insurer_payment` row created by the trigger via the actual
+  route (not a direct DB write). Terminal-state/bad-enum/not-found guard
+  rails all confirmed 400 with expected messages, matching
+  `test_api.py`'s mocks exactly.
+- `web/src/pages/DemandsPage.tsx` had NO button for any transition past
+  `mark-sent` -- the route existed and worked, but no staff user could
+  ever reach it through the dashboard. Added `advanceDemandStatus()`
+  (`web/src/api.ts`) + per-row transition buttons mirroring
+  `app/models.py`'s `DEMAND_VALID_NEXT_STATES`.
+- New `web/src/pages/CarriersPage.tsx` (`/carriers` route): the handoff
+  §2.8 market-rate exhibit had zero frontend consumer despite the
+  backend routes existing since earlier the same day. Now lists
+  carriers, creates carriers/adjusters, shows the exhibit + resolved-
+  claims history per carrier -- live-verified against real staging.
+
+See `docs/BUILD_LOG.md`'s matching entry for full detail. Nothing
+further to do on this specific gap; kept as a resolved marker.
+
+**New small items surfaced (not urgent, no design decision needed):**
+- `CarriersPage` can create a carrier but not edit an existing one's
+  fax/email/phone/aliases after creation (only
+  `POST /insurance-carriers/{id}/aliases` exists as a partial-update
+  route today).
+- The market-rate exhibit has no date-range/vehicle-class filtering in
+  either the API or the UI yet (handoff §2.8 mentions both as
+  first-class query needs) -- current routes return every row for the
+  carrier, filtering would be client-side only today.
+
+---
+
+
 
 **What:** `queue_id=2` had sat `pending` across multiple prior cron
 cycles because no admin action existed to resolve it — flagged

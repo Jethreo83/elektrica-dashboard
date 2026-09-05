@@ -2516,3 +2516,115 @@ follow-up once a trustworthy `DATABASE_URL` is available in this shell.
 Not fabricating a live-verification writeup to match this repo's usual
 standard when it did not actually happen this cycle.
 
+---
+
+## 2026-09-05 (cron cycle, later still) — live-verified POST /demands/{id}/status against real staging; closed the frontend gap it exposed; new Carriers/Insurer-Payments page
+
+**Starting point this cycle:** fetched origin/main (up to date, HEAD
+`711181b`), read `docs/BUILD_LOG.md`/`BACKLOG.md` tail first per the
+lesson logged earlier this same day. `python -m pytest` green (180/180)
+at start. This shell's exported `DATABASE_URL` was again the WRONG
+branch (`ep-damp-bird-...`, actually the **production** endpoint per
+`neon branches list` — not just "some other project's env var" as
+previously assumed, worth noting for next time). Did not connect to it.
+Instead used the `neon` CLI (`NEON_API_KEY` was present) to resolve the
+real staging (`br-broad-hat-a5uyz6he`) connection string properly:
+`neon connection-string staging --project-id aged-art-92489373
+--role-name neondb_owner` for host, then the Neon API's
+`reveal_password` endpoint for the credential (CLI doesn't print
+passwords). Confirmed via `current_database()`/row spot-checks that this
+resolved connection is genuinely staging, not a guess.
+
+**What this closes:** the previous cycle's entry explicitly deferred
+live-verifying `POST /demands/{demand_id}/status` end-to-end because it
+had no trustworthy `DATABASE_URL`. Done this cycle, against real
+staging, via real HTTP (not a direct DB write, not mocks):
+- Booted a scratch `uvicorn` (port 8722) against the real staging DB
+  with a throwaway `JWT_SECRET`, minted a matching HS256 JWT (`iss:
+  shell-dashboard`, `google_email: jed@elektricarentals.com`, elektrica
+  grant) to pass `require_staff`/`enforce_staff_auth` legitimately
+  rather than disabling auth.
+- `POST /demands/1/status {negotiating}` -> 200, `{resolved}` -> 200.
+  Confirmed via direct SELECT that `elektrica.insurer_payment` id=4
+  (demand_id=1, carrier_id=15, amount_demanded=450.00,
+  amount_paid=450.00, market_rate_at_time=55.00, days_to_resolve=1,
+  source='cron-verify') was created by the trigger — the FIRST time
+  this trigger has fired via the actual HTTP route rather than a direct
+  DB write or a prior cycle's own scratch script.
+- Confirmed the guard rails too, all real staging responses: re-POSTing
+  `{negotiating}` on the now-`resolved` demand 1 -> 400 ("Valid next
+  states: []" -- terminal state correctly enforced); bad enum value on
+  demand 3 -> 400 with the exact valid-value list; nonexistent demand
+  999999 -> 400 ("No demand with id=999999"). All three match
+  `test_api.py`'s mocked expectations exactly -- no drift between mock
+  and reality.
+- Server killed after each boot; `netstat` confirmed no `LISTENING`
+  socket remained, only expected client-side `TIME_WAIT`.
+
+**New gap found by this live run (fixed this cycle, not just logged):**
+while verifying, re-read `web/src/pages/DemandsPage.tsx` and confirmed
+the frontend gap the earlier cycle's own docstring on `advance_demand_status`
+implied but never checked: the UI wired `mark-sent` only. There was NO
+button anywhere in the dashboard that could ever call
+`POST /demands/{id}/status` -- meaning the insurer_payment
+auto-population this cycle just proved works end-to-end via the API was
+still functionally UNREACHABLE by an actual staff user clicking through
+the actual app, only by a script or curl. Closed:
+- `web/src/api.ts`: `advanceDemandStatus()`.
+- `web/src/pages/DemandsPage.tsx`: `DEMAND_NEXT_STATES` lookup (mirrors
+  `app/models.py`'s `DEMAND_VALID_NEXT_STATES` exactly, commented as
+  such -- the SERVER is still the real enforcement, this is just so the
+  UI doesn't offer a doomed button) + a `→ {status}` button per valid
+  transition on every demand row, with a confirm() dialog specifically
+  on the resolve action since that's the one that's irreversible and
+  fires the trigger.
+
+**Second gap found and closed: no Carriers/Insurer-Payments frontend
+page existed at all.** Handoff §2.8 calls the insurer-payment tracker +
+market-rate exhibit a "strategic asset" -- the whole point (a lowball
+adjuster offer gets met with "this same carrier paid market rate on N
+prior claims") requires a human to actually see that exhibit somewhere.
+The backend routes (`GET /insurance-carriers/{id}/insurer-payments`,
+`GET /insurance-carriers/{id}/market-rate-exhibit`, migration 016) have
+existed since earlier today but had zero frontend consumers beyond
+`DemandsPage`'s own carrier/adjuster dropdowns (read-only, for demand
+creation). New `web/src/pages/CarriersPage.tsx` (routed at `/carriers`,
+added to `App.tsx` nav): lists carriers, create-carrier form, and per
+selected carrier -- the market-rate exhibit table, the resolved-claims
+history table (the actual `insurer_payment` rows), and adjusters with a
+create-adjuster form (`api.createInsuranceCarrier`/`createAdjuster`,
+new in `web/src/api.ts`, both previously backend-only with no frontend
+caller).
+
+**Live-verified the new page's own API calls against real staging too**
+(same scratch uvicorn, real JWT): `GET /insurance-carriers` (9 real
+carrier rows), `GET /insurance-carriers/15/market-rate-exhibit` ->
+`{claim_count: 1, avg_amount_demanded: 450.00, avg_amount_paid: 450.00,
+avg_market_rate: 55.00}` -- exactly the demand-1 resolution from this
+same cycle, proving the exhibit calculation is live and correct, not
+just schema-present. `GET /insurance-carriers/15/insurer-payments`
+returned that same row.
+
+**Typechecked, not just visually reviewed:** `cd web && npx tsc -b`
+clean, twice (once after the DemandsPage edit, once after api.ts +
+CarriersPage + App.tsx). `python -m pytest` still 180/180 after all
+changes (no backend code touched this cycle, only frontend, but
+re-ran to confirm nothing regressed).
+
+**Not done / explicitly deferred (unchanged from before):**
+`elektrica.vehicle` promotion still pending Jed's explicit per-table
+sign-off; migration 007's `vls.case` grant-scope flag still open; real
+Fleet columns (Year/Make/Model/etc.) still needs Jed's scoping decision;
+`insurer_payment` HISTORICAL import (handoff §2.9) still export-blocked.
+CarriersPage does not yet support editing an existing carrier's
+fax/email/phone/aliases post-creation (no route exists for that beyond
+`POST /insurance-carriers/{id}/aliases`) or date-range/vehicle-class
+filtering on the exhibit (handoff §2.8 mentions both; current routes
+return everything for the carrier, client-side filtering only) -- both
+small, no design decision needed, natural next-cycle items.
+
+**Committed:** `web/src/api.ts`, `web/src/pages/DemandsPage.tsx`,
+`web/src/App.tsx`, new `web/src/pages/CarriersPage.tsx`. No migrations,
+no backend app/ changes this cycle -- pure frontend wiring of
+already-built, now live-verified backend routes.
+

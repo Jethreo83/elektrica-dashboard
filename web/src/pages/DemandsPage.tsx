@@ -1,5 +1,20 @@
 import { useEffect, useState } from 'react';
-import { api, type Demand, type DemandType, type DemandRecipientType, type InsuranceCarrier, type Adjuster } from '../api';
+import { api, type Demand, type DemandType, type DemandRecipientType, type DemandStatus, type InsuranceCarrier, type Adjuster } from '../api';
+
+// Mirrors app/models.py's DEMAND_VALID_NEXT_STATES exactly -- the server
+// is the real enforcement (no DB trigger on elektrica.demand_status, see
+// that module's own docstring), this is just so the UI only ever offers
+// buttons for transitions that can actually succeed. draft->sent stays
+// mark-sent's own button below; every other terminal (resolved) row gets
+// no buttons at all.
+const DEMAND_NEXT_STATES: Record<DemandStatus, DemandStatus[]> = {
+  draft: [],
+  sent: ['negotiating', 'resolved'],
+  negotiating: ['no_offer', 'resolved'],
+  no_offer: ['accepted', 'resolved'],
+  accepted: ['resolved'],
+  resolved: [],
+};
 
 export default function DemandsPage() {
   const [aging, setAging] = useState<any[] | null>(null);
@@ -15,6 +30,7 @@ export default function DemandsPage() {
   const [carrierId, setCarrierId] = useState('');
   const [adjusterId, setAdjusterId] = useState('');
   const [markingSent, setMarkingSent] = useState<number | null>(null);
+  const [advancing, setAdvancing] = useState<number | null>(null);
 
   useEffect(() => {
     api.agingDemands().then(setAging).catch((e) => setError(e.body?.detail ?? e.message));
@@ -66,6 +82,23 @@ export default function DemandsPage() {
       setError(e.body?.detail ?? e.message);
     } finally {
       setMarkingSent(null);
+    }
+  };
+
+  const handleAdvanceStatus = async (demandId: number, targetStatus: DemandStatus) => {
+    if (targetStatus === 'resolved' && !window.confirm(
+      'Resolve this demand? For a carrier-recipient demand this fires the ' +
+      'insurer_payment auto-population trigger (migration 016) and cannot be reversed via this button.'
+    )) return;
+    setAdvancing(demandId);
+    setError(null);
+    try {
+      await api.advanceDemandStatus(demandId, { target_status: targetStatus, actor: 'dashboard' });
+      loadDemands();
+    } catch (e: any) {
+      setError(e.body?.detail ?? e.message);
+    } finally {
+      setAdvancing(null);
     }
   };
 
@@ -157,6 +190,17 @@ export default function DemandsPage() {
                           {markingSent === d.id ? 'Marking…' : 'Mark sent'}
                         </button>
                       )}
+                      {DEMAND_NEXT_STATES[d.status].map((next) => (
+                        <button
+                          key={next}
+                          className="ek-btn secondary"
+                          style={{ marginLeft: 6 }}
+                          onClick={() => handleAdvanceStatus(d.id, next)}
+                          disabled={advancing === d.id}
+                        >
+                          {advancing === d.id ? 'Working…' : `→ ${next}`}
+                        </button>
+                      ))}
                     </td>
                   </tr>
                 ))}
