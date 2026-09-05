@@ -10,6 +10,7 @@ import TollsPage from './pages/TollsPage';
 import PaymentsPage from './pages/PaymentsPage';
 import CompliancePage from './pages/CompliancePage';
 import PersonMatchQueuePage from './pages/PersonMatchQueuePage';
+import ProposalsQueuePage from './pages/ProposalsQueuePage';
 import StaffAdminPage from './pages/StaffAdminPage';
 
 const NAV_ITEMS = [
@@ -20,6 +21,7 @@ const NAV_ITEMS = [
   { to: '/payments', label: 'Payments' },
   { to: '/compliance', label: 'Compliance' },
   { to: '/person-match-queue', label: 'Identity Queue' },
+  { to: '/proposals', label: 'Bot Proposals' },
 ];
 
 const OWNER_NAV_ITEM = { to: '/staff', label: 'Staff' };
@@ -72,6 +74,7 @@ function AppShell() {
           <Route path="/payments" element={<PaymentsPage />} />
           <Route path="/compliance" element={<CompliancePage />} />
           <Route path="/person-match-queue" element={<PersonMatchQueuePage />} />
+          <Route path="/proposals" element={<ProposalsQueuePage />} />
           <Route path="/staff" element={<StaffAdminPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

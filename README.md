@@ -205,8 +205,9 @@ JP-only litigation branch, not forked.
 `web/` — React + TypeScript + Vite, port 5181 (pinned, `strictPort`).
 Landed 2026-09-05 (`5ea26c0`): pages for Fleet, Rentals (list+detail),
 Demands, Payments, Tolls, Compliance, Staff Admin, Person-Match Queue,
-Login. `src/api.ts` is a thin typed fetch wrapper matching every
-Pydantic response model in `app/api.py`, Bearer token from `src/auth.tsx`,
-401 forces logout. `npx tsc --noEmit` and `npm run build` both verified
-clean (0 errors) 2026-09-05. Talks to the backend via `VITE_API_BASE_URL`
-(`web/.env.example`, defaults to `http://localhost:8001`).
+Bot Proposals Queue, Login. `src/api.ts` is a thin typed fetch wrapper
+matching every Pydantic response model in `app/api.py`, Bearer token
+from `src/auth.tsx`, 401 forces logout. `npx tsc --noEmit` and
+`npm run build` both verified clean (0 errors) 2026-09-05. Talks to
+the backend via `VITE_API_BASE_URL` (`web/.env.example`, defaults to
+`http://localhost:8001`).

@@ -2228,3 +2228,86 @@ whether any other frontend page is calling a narrower route than the
 backend actually offers (the same pattern just fixed here) before
 assuming frontend work is fully caught up to the backend's route
 surface.
+
+## 2026-09-05 (cron cycle, later) — checked every frontend page against its backend route surface; found and closed one real gap (proposals review queue never had a UI)
+
+**Starting point:** `git fetch` first, `origin/main` unchanged since the
+previous cycle's push (`d9d720b`). Working tree clean. Per the prior
+cycle's own "next up" note, audited every `web/src/pages/*.tsx`'s
+`api.*` calls against the full route list in `app/api.py` (55 routes) to
+check for the same "frontend calls a narrower/wrong route than the
+backend offers" pattern already found and fixed once (fleet-board).
+
+**Finding:** every other page's route usage matches the backend
+correctly (Demands/Tolls/Payments/Compliance/PersonMatchQueue/StaffAdmin
+all call exactly what their corresponding backend routes expect). The
+one real gap wasn't a wrong-route call, but a *missing page*:
+`POST /rentals/{id}/proposals` / `GET /proposals/pending` /
+`POST /proposals/{id}/decision` (handoff §1.7, migration 004, live since
+day one of this build) had no frontend consumer at all — same shape of
+gap `PersonMatchQueuePage` closed for `person_match_queue` two cycles
+ago, just never done for proposals.
+
+**What was built:** `web/src/pages/ProposalsQueuePage.tsx` (new), mirrors
+`PersonMatchQueuePage.tsx`'s established pattern exactly (load-on-mount,
+per-row `window.confirm()` before a destructive decision, disabled-while-
+deciding button state, error surfaced inline) rather than inventing a new
+UI convention for what is structurally the same kind of human-review
+queue. `web/src/api.ts`: `Proposal`/`ProposalKind`/`ProposalStatus`
+types matching `app/api.py`'s `ProposalOut`/`ProposalIn` Pydantic models
+exactly, `coerceProposal()` (bigint-as-string id coercion, same
+discipline as every other coerce* helper in this file),
+`listPendingProposals()`/`decideProposal()`. Wired into `App.tsx` nav
+("Bot Proposals") and routes (`/proposals`) for every staff role — no
+role restriction, since accepting/rejecting a bot proposal is the same
+class of action `PersonMatchQueuePage` already exposes to `staff`, not
+an owner-only capability like `/staff`.
+
+**Deliberately NOT built:** a form to create a proposal from this
+dashboard. `POST /rentals/{id}/proposals` is gated by
+`require_bot_api_key` (`X-Api-Key` header) specifically because handoff
+§1.7 frames this as the *bot's* write path, not a human one — a
+dashboard button that could write here would need this frontend to hold
+that scoped key, which is a real credential-exposure question this
+cycle doesn't have standing to decide unilaterally. The page is
+read+decide only, matching what the backend actually lets a JWT-authed
+staff session do today.
+
+**Verification performed (real, not simulated):**
+1. `npx tsc --noEmit` — 0 errors.
+2. `npm run build` — vite production build succeeds (276KB JS bundle,
+   up from 273KB; the only functional delta this cycle).
+3. `python -m pytest` — 166/166 (backend untouched this cycle; the
+   `/proposals/*` routes' own coverage, `test_create_proposal*`/
+   `test_get_pending_proposals`/`test_decide_proposal*` in `test_api.py`,
+   predates this cycle and was already passing).
+4. Did NOT attempt a live curl/browser check against the real running
+   `uvicorn`(8001)/`vite`(5181) dev servers left up by a concurrent
+   session (confirmed both still healthy, `/health` 200, left running
+   untouched, same "don't kill another session's server" discipline as
+   the prior cycle) — no JWT_SECRET/DATABASE_URL is present in this
+   session's environment or an `.env` file to mint a real shell-issued
+   SSO JWT against that live backend's actual secret, and guessing one
+   would be fabricating a credential this session doesn't own. Flagging
+   this honestly rather than skipping it silently: a future cycle with
+   real access to `.env`/`JWT_SECRET` should do one real end-to-end
+   click-through of `/proposals` (there are currently zero real
+   proposal rows anywhere — the rental-operations bot handoff §1.7/E-3
+   defers doesn't exist yet — so even a live check today would only
+   confirm the empty-state renders, not exercise the accept/reject path;
+   noting that as a real limit, not glossing over it).
+
+**Not done / explicitly deferred (unchanged from last cycle):**
+`elektrica.vehicle` promotion still pending Jed's explicit per-table
+sign-off; migration 007's `vls.case` grant-scope flag still open; real
+Fleet columns (Year/Make/Model/etc.) still needs Jed's scoping decision;
+`insurer_payment` historical import still export-blocked; no
+auth/session layer gaps remain open (JWT middleware covers all
+human-operated routes).
+
+**Next up:** frontend route-surface audit is now complete — no other
+gaps of this shape found. The backend's own thin build-order queue
+(`elektrica.vehicle` promotion decision, `vls.case` grant-scope, real
+Fleet columns) is the same set flagged as open in the last two cycles;
+worth Jed picking one rather than this cycle guessing which is highest
+priority.

@@ -166,6 +166,18 @@ export interface PersonMatchQueueDecisionResult {
   renter: Renter | null;
 }
 
+export type ProposalKind = 'departure' | 'return' | 'dates' | 'tolls';
+export type ProposalStatus = 'pending' | 'accepted' | 'rejected';
+
+export interface Proposal {
+  id: number;
+  rental_id: number;
+  kind: ProposalKind;
+  proposed_values: Record<string, unknown>;
+  source_system: string;
+  status: ProposalStatus;
+}
+
 export interface InsuranceCarrier {
   id: number;
   name: string;
@@ -285,6 +297,9 @@ function coerceFleetBoardOutRow(r: any): FleetBoardOutRow {
 function coerceFleetBoardAvailableRow(r: any): FleetBoardAvailableRow {
   return { ...r, vehicle_id: Number(r.vehicle_id) };
 }
+function coerceProposal(p: any): Proposal {
+  return { ...p, id: Number(p.id), rental_id: Number(p.rental_id) };
+}
 
 export const api = {
   // Fleet
@@ -318,6 +333,18 @@ export const api = {
       resulting_person_id: Number(r.resulting_person_id),
       renter: r.renter ? coerceRenter(r.renter) : null,
     })),
+
+  // Rental proposals (bot interface, handoff §1.7) -- POST is X-Api-Key
+  // gated server-side (require_bot_api_key), written by the future
+  // rental-operations bot, never by this dashboard. This frontend only
+  // exercises the human-review half: list pending, accept/reject.
+  listPendingProposals: () =>
+    apiFetch<Proposal[]>('/proposals/pending').then((rows) => rows.map(coerceProposal)),
+  decideProposal: (proposalId: number, body: { status: 'accepted' | 'rejected'; actor: string }) =>
+    apiFetch<Proposal>(`/proposals/${proposalId}/decision`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(coerceProposal),
 
   // Rentals
   listBlockedRentals: () => apiFetch<any[]>('/rentals/blocked'),
