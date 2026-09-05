@@ -2311,3 +2311,129 @@ gaps of this shape found. The backend's own thin build-order queue
 Fleet columns) is the same set flagged as open in the last two cycles;
 worth Jed picking one rather than this cycle guessing which is highest
 priority.
+
+## 2026-09-05 (cron cycle, later) — elektrica.insurer_payment (migration 016) built; found and fixed a latent test-harness bug
+
+**Starting point:** `git fetch` first, `origin/main` unchanged since the
+previous cycle's push (`7b1943d`). Working tree clean. Direct query
+against real staging Postgres confirmed the schema state matched
+`docs/BACKLOG.md`/`docs/OVERNIGHT_DECISIONS.md`'s own description exactly
+(no `insurer_payment` table, `platform.insurance_carrier`/`adjuster`
+already live from migration 013) before writing anything.
+
+**What was built:** the last unbuilt item in ADR-001 v2/handoff §6's own
+build order step 3 ("vehicle/rental/assignment -> proposals + bot API ->
+demand + frozen comps -> outbound log -> comms -> payments ->
+insurer_payment + adjuster") -- adjuster existed (migration 013),
+insurer_payment did not. `migrations/016_elektrica_insurer_payment.sql`:
+
+- `elektrica.insurer_payment` -- handoff §2.8's literal field list
+  (carrier_id, adjuster_id nullable, claim ref, vehicle class, rental
+  dates, market rate at the time, amount demanded, amount paid, days,
+  resolved_at, source, source_ref, frozen flag). `claim_ref` is
+  PLACEHOLDER (no source exists anywhere in this schema for a claim
+  number yet); `days_to_resolve` is my own literal interpretation of
+  "days" (handoff doesn't define it precisely) as days-since-sent, since
+  rental duration is already captured separately via
+  rental_start_date/rental_end_date.
+- **Automatic population, not a create route:** an `AFTER UPDATE` trigger
+  on `elektrica.demand` fires exactly once, the moment a carrier-
+  recipient demand's status flips to 'resolved' -- pulls carrier/
+  adjuster/amount from the demand itself, vehicle_class/market_rate from
+  its `comparable_set`, amount_paid from summed `elektrica.payment` rows.
+  `UNIQUE(demand_id)` + `ON CONFLICT DO NOTHING` guard against
+  double-insertion if status somehow flips to 'resolved' more than once.
+  A `balance_to_renter` demand resolving creates NO row -- handoff §2.8
+  is explicitly carrier/adjuster-specific.
+- Frozen/append-only (`REVOKE UPDATE, DELETE FROM PUBLIC`) -- same
+  philosophy as `elektrica.payment`/`elektrica.comparable_set`.
+  `insurer_payment_exhibit` view pre-joins carrier/adjuster names.
+- This is explicitly NOT the historical import (handoff §2.9) -- that
+  stays export-blocked. `legacy_import` remains a valid `source` enum
+  value for that future work only; nothing here inserts a legacy row.
+
+**Verified with `scripts/verify_016.sql`** (8 checks, run statement-by-
+statement against real staging Postgres): full end-to-end auto-
+population through a real carrier/adjuster/renter/vehicle/rental/demand/
+comparable_set/payment setup (correct amounts/dates confirmed by direct
+SELECT); re-resolving a demand does not create a duplicate row; a
+`balance_to_renter` resolve creates zero rows; direct UPDATE/DELETE on
+`insurer_payment` both correctly blocked; the exhibit view's join is
+correct; `elektrica_app` has exactly SELECT/INSERT, no UPDATE/DELETE.
+All 8 passed. (Caught and fixed one bug in the verify script itself
+along the way -- an ambiguous `id` column reference across a two-table
+join in CHECK 4 -- before it was ever committed.)
+
+**App layer:** `app/models.py` (`InsurerPayment` dataclass,
+`InsurerPaymentSource` enum -- deliberately no unrestricted "create"
+path; `record_legacy_insurer_payment()` is gated to
+`source='legacy_import'` only, for the still-blocked historical import),
+`app/repository.py` (`get_insurer_payment`,
+`list_insurer_payments_for_carrier`, `list_insurer_payments_for_rental`,
+`get_carrier_market_rate_exhibit` -- the concrete "N prior claims"
+aggregate handoff §2.8 describes), `app/api.py` (4 new read-only GET
+routes: `/insurance-carriers/{id}/insurer-payments`,
+`/insurance-carriers/{id}/market-rate-exhibit`,
+`/rentals/{id}/insurer-payments`, `/insurer-payments/{id}` -- no POST
+route anywhere, since every 'system' row is DB-trigger-only).
+
+**REAL BUG FOUND AND FIXED (test harness, not app code):**
+`test_api.py`'s own `check()` helper only printed + appended to a
+`FAILED` list on failure -- it never raised. This means a genuinely
+failing assertion inside any `test_*` function would print "FAIL: ..."
+but the function would still return normally, and pytest (which only
+looks at whether a test function raised) would report it as PASSED
+regardless. This is the exact same latent bug already found and fixed
+once in `complete-collision-dashboard`'s own `test_api.py` -- confirmed
+it reproduced here first (a deliberately-failing `check()` call did not
+raise) before fixing it to `raise AssertionError(...)` on failure.
+Reran the full suite after the fix: still 175/175 pytest, 136/136 manual
+runner -- the fix did not uncover any previously-hidden real failures in
+this repo's existing tests, but `check()` now genuinely enforces
+correctness for every future cycle, not just this one.
+
+**Tests:** 9 new mocked `test_api.py` cases covering all 4 new routes'
+success + 404 paths, plus the no-claims-yet vs. has-claims shape of the
+market-rate exhibit. 175/175 pytest, 136/136 manual runner
+(`python test_api.py`) both green.
+
+**Live-verified end-to-end against real staging Postgres, via a real
+HTTP client (not a mock):** booted a scratch `uvicorn` on port 8935
+(left the concurrent session's own server on 8001 alone, confirmed
+healthy, untouched) against the real staging `DATABASE_URL`. Created a
+real carrier ("CycleCheck Insurance Co") + adjuster via
+`POST /insurance-carriers` / `POST /insurance-carriers/{id}/adjusters`,
+a real renter via `POST /renters/intake`, a real vehicle + rental, a
+real carrier-recipient demand, marked it sent, attached a real
+`comparable_set`, recorded a real `payment` -- all via real HTTP POSTs
+against the real running server, not fixtures. Then flipped the
+demand's status to 'resolved' via a direct one-off DB script (no HTTP
+route exists yet for this -- see the new BACKLOG.md gap below) and
+confirmed via `GET /insurance-carriers/{id}/insurer-payments`,
+`GET /insurance-carriers/{id}/market-rate-exhibit`,
+`GET /rentals/{id}/insurer-payments`, and `GET /insurer-payments/{id}`
+that the trigger-created row surfaced correctly through every route,
+with the exact amounts/dates expected (amount_demanded=950.00,
+amount_paid=870.00, market_rate_at_time=50.00, days_to_resolve=0).
+Confirmed all four routes' 404 cases too. Killed the scratch server
+after (`SIGTERM`, confirmed via `netstat` no `LISTENING` socket remains
+on 8935 afterward, only expected `TIME_WAIT` client-side residue).
+
+**New gap found and logged (not fixed this cycle):** the live
+verification above needed a direct DB write to resolve the demand
+because no HTTP route exists to advance `elektrica.demand` past 'sent'
+-- see `docs/BACKLOG.md`'s new entry. This means insurer_payment's
+DB-verified auto-population is currently unreachable from the actual
+dashboard, only from a direct DB write. Logged as the natural next item,
+not blocked on anything.
+
+**Not done / explicitly deferred (unchanged):** `elektrica.vehicle`
+promotion still pending Jed's explicit per-table sign-off; migration
+007's `vls.case` grant-scope flag still open; real Fleet columns
+(Year/Make/Model/etc.) still needs Jed's scoping decision;
+`insurer_payment` HISTORICAL import (handoff §2.9) still export-blocked
+(this cycle built the schema/auto-population only, not the backfill).
+
+**Committed & pushed:** `9c38383` (migration 016 + app layer + tests),
+`4a83ac9` (docs) → `origin/main`, no rebase conflicts.
+
