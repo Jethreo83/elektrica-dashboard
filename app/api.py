@@ -307,6 +307,21 @@ async def enforce_staff_auth(request, call_next):
     path = request.url.path
     public_exact = {"/health"}
     public_prefixes = ("/docs", "/openapi.json", "/redoc")
+    if request.method == "OPTIONS":
+        # CORS preflight. Real bug found 2026-09-05 (hermes, via Jed
+        # testing the shell->Elektrica SSO handoff end-to-end): this
+        # custom @app.middleware("http") runs OUTSIDE/before
+        # CORSMiddleware in Starlette's pipeline (middleware order is
+        # last-added-runs-first, and this one is registered via the
+        # decorator after add_middleware(CORSMiddleware...) already
+        # ran) -- so every OPTIONS preflight hit this 401 check before
+        # CORSMiddleware ever got a chance to short-circuit it with the
+        # proper CORS headers. Browsers can't read a response with no
+        # CORS headers at all, so this surfaced as a generic "Failed to
+        # fetch" in the frontend with no other clue. Preflights never
+        # carry credentials/Authorization by spec, so it's always safe
+        # to pass them straight through to CORSMiddleware.
+        return await call_next(request)
     if path in public_exact or path.startswith(public_prefixes):
         return await call_next(request)
     if path.endswith("/proposals") and request.method == "POST":
