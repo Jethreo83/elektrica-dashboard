@@ -43,6 +43,8 @@ from app.models import (
     DocumentTemplateFamily,
     EventSource,
     InsuranceCarrier,
+    InsurerPayment,
+    InsurerPaymentSource,
     OutboundChannel,
     OutboundLog,
     Payment,
@@ -1240,6 +1242,125 @@ def _adjuster_from_row(row) -> Adjuster:
         phone=row["phone"], email=row["email"], notes=row["notes"],
         created_at=row["created_at"], updated_at=row["updated_at"],
         created_by=row["created_by"], updated_by=row["updated_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# elektrica.insurer_payment (migrations/016) -- handoff §2.8's carrier
+# market-rate exhibit. Read-only from the application's normal point of
+# view: rows for source='system' are created exclusively by the DB
+# trigger elektrica.demand_create_insurer_payment_on_resolve() the
+# moment a carrier-recipient demand's status flips to 'resolved' -- no
+# repository function here inserts a 'system' row directly, matching
+# migrations/016's own header ("populates automatically from every
+# resolved demand"). The one write path below (record_legacy_insurer_
+# payment) exists only for the future historical import (handoff §2.9,
+# still export-blocked) and is source='legacy_import'-only by
+# construction (InsurerPayment.__post_init__ also enforces this).
+# ---------------------------------------------------------------------------
+
+def get_insurer_payment(cur, insurer_payment_id: int) -> Optional[InsurerPayment]:
+    cur.execute("SELECT * FROM elektrica.insurer_payment WHERE id = %s", (insurer_payment_id,))
+    row = cur.fetchone()
+    return _insurer_payment_from_row(row) if row else None
+
+
+def list_insurer_payments_for_carrier(cur, carrier_id: int) -> list[InsurerPayment]:
+    """Handoff §2.8's own filter example ("filter by carrier, date
+    range, vehicle class"). Date-range/vehicle-class filtering is left
+    to the caller (client-side or a future query-param addition) same
+    as every other list_* route in this repo -- no query-param
+    filtering exists anywhere yet (see list_demands_for_rental's own
+    docstring for the same convention)."""
+    cur.execute(
+        "SELECT * FROM elektrica.insurer_payment WHERE carrier_id = %s ORDER BY resolved_at DESC",
+        (carrier_id,),
+    )
+    return [_insurer_payment_from_row(r) for r in cur.fetchall()]
+
+
+def list_insurer_payments_for_rental(cur, rental_id: int) -> list[InsurerPayment]:
+    cur.execute(
+        "SELECT * FROM elektrica.insurer_payment WHERE rental_id = %s ORDER BY resolved_at",
+        (rental_id,),
+    )
+    return [_insurer_payment_from_row(r) for r in cur.fetchall()]
+
+
+def get_carrier_market_rate_exhibit(cur, carrier_id: int) -> dict:
+    """The actual exhibit handoff §2.8 describes: "this same carrier
+    paid market rate on N prior claims" -- N, plus average
+    amount_demanded/amount_paid, over every resolved insurer_payment row
+    for this carrier. Deliberately a simple aggregate, not a
+    vehicle_class/date-range-parameterized report -- those filters are
+    exactly list_insurer_payments_for_carrier()'s job; a caller wanting
+    the exhibit for a specific slice filters that list client-side, same
+    convention as everywhere else in this repo. Returns zeros/None
+    fields (not a 404) when a carrier has no resolved insurer_payment
+    rows yet -- "no history yet" is a valid, expected state for a
+    brand-new carrier, not an error."""
+    cur.execute(
+        """
+        SELECT count(*) AS claim_count,
+               AVG(amount_demanded) AS avg_amount_demanded,
+               AVG(amount_paid) AS avg_amount_paid,
+               AVG(market_rate_at_time) AS avg_market_rate
+        FROM elektrica.insurer_payment WHERE carrier_id = %s
+        """,
+        (carrier_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else {"claim_count": 0}
+
+
+def record_legacy_insurer_payment(cur, payment: InsurerPayment, actor: str) -> InsurerPayment:
+    """The ONE write path for elektrica.insurer_payment -- for the
+    future historical import only (handoff §2.9, still export-blocked
+    as of this cycle; docs/OVERNIGHT_DECISIONS.md's open BLOCKER entry).
+    Raises ValueError if payment.source is not LEGACY_IMPORT -- this
+    function must never be used to fabricate a 'system' row by hand;
+    those are exclusively the DB trigger's job. The
+    insurer_payment_one_per_demand UNIQUE constraint (migrations/016)
+    still applies: a demand_id can have at most one insurer_payment row
+    regardless of source, so a legacy row can only be recorded for a
+    demand that doesn't already have a system-generated one."""
+    if payment.source != InsurerPaymentSource.LEGACY_IMPORT:
+        raise ValueError(
+            "record_legacy_insurer_payment() only accepts source='legacy_import' -- "
+            "'system' rows are created exclusively by the DB trigger on demand resolution."
+        )
+    cur.execute(
+        """
+        INSERT INTO elektrica.insurer_payment (
+            demand_id, rental_id, carrier_id, adjuster_id, claim_ref,
+            vehicle_class, rental_start_date, rental_end_date,
+            market_rate_at_time, amount_demanded, amount_paid,
+            days_to_resolve, resolved_at, source, source_ref, created_by
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            payment.demand_id, payment.rental_id, payment.carrier_id, payment.adjuster_id,
+            payment.claim_ref, payment.vehicle_class.value if payment.vehicle_class else None,
+            payment.rental_start_date, payment.rental_end_date, payment.market_rate_at_time,
+            payment.amount_demanded, payment.amount_paid, payment.days_to_resolve,
+            payment.resolved_at, payment.source.value, payment.source_ref, actor,
+        ),
+    )
+    return _insurer_payment_from_row(cur.fetchone())
+
+
+def _insurer_payment_from_row(row) -> InsurerPayment:
+    return InsurerPayment(
+        id=row["id"], demand_id=row["demand_id"], rental_id=row["rental_id"],
+        carrier_id=row["carrier_id"], adjuster_id=row["adjuster_id"], claim_ref=row["claim_ref"],
+        vehicle_class=VehicleClass(row["vehicle_class"]) if row["vehicle_class"] else None,
+        rental_start_date=row["rental_start_date"], rental_end_date=row["rental_end_date"],
+        market_rate_at_time=row["market_rate_at_time"], amount_demanded=row["amount_demanded"],
+        amount_paid=row["amount_paid"], days_to_resolve=row["days_to_resolve"],
+        resolved_at=row["resolved_at"], source=InsurerPaymentSource(row["source"]),
+        source_ref=row["source_ref"], frozen=row["frozen"],
+        created_at=row["created_at"], created_by=row["created_by"],
     )
 
 

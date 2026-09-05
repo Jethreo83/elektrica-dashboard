@@ -32,7 +32,8 @@ from app.models import (
     Adjuster, ComparableSet, Communication, CommunicationChannel, CommunicationDirection,
     CommunicationMatchStatus, ComplianceItem, ComplianceItemStatus,
     ComplianceItemType, Demand, DemandRecipientType, DemandType,
-    Document, DocumentTemplate, DocumentTemplateFamily, InsuranceCarrier, OutboundChannel,
+    Document, DocumentTemplate, DocumentTemplateFamily, InsuranceCarrier,
+    InsurerPayment, InsurerPaymentSource, OutboundChannel,
     OutboundLog, Payment, PaymentSource, ProposalKind, ProposalStatus,
     Renter, Rental, RentalBilledTo, RentalEvent, RentalProposal, RentalState,
     EventSource, StaffRole, StaffUser, Toll, Vehicle,
@@ -52,11 +53,25 @@ client = TestClient(app)
 
 
 def check(name: str, condition: bool, detail: str = ""):
+    """Raises AssertionError on failure (not just prints) so both
+    invocation styles genuinely fail: pytest's collection of these
+    test_* functions actually reports a failure (pytest does NOT
+    inspect a plain print()/list-append side effect -- a test_* function
+    that returns normally is a PASS to pytest regardless of what it
+    printed), and the `python test_api.py` manual runner's own
+    FAILED-list summary at the bottom still works via the same list.
+    REAL BUG FIXED (2026-09-05, elektrica cron cycle): this function
+    previously only appended to FAILED and printed, never raising -- the
+    exact same latent bug already found and fixed in
+    complete-collision-dashboard's test_api.py (see that repo's own fix
+    for the identical pattern). Confirmed the bug reproduces here before
+    fixing it (a deliberately-failing check() call did not raise)."""
     if condition:
         print(f"PASS: {name}")
     else:
         print(f"FAIL: {name} {detail}")
         FAILED.append(name)
+        raise AssertionError(f"{name}: {detail}")
 
 
 def _sample_vehicle(**overrides) -> Vehicle:
@@ -1310,6 +1325,110 @@ def test_get_adjuster_not_found():
     check("test_get_adjuster_not_found", r.status_code == 404, r.text)
 
 
+# --- Insurer payments (elektrica.insurer_payment, migrations/016) -----------
+# Read-only from the API's point of view -- every check here exercises a
+# GET route against a mocked repository return, same discipline as every
+# other read-only route family in this file. No create/POST route exists
+# to test: source='system' rows are DB-trigger-only, and the
+# source='legacy_import' write path is repository-layer-only until the
+# historical import (handoff §2.9) actually gets wired to an HTTP route.
+
+def _sample_insurer_payment(**overrides) -> InsurerPayment:
+    defaults = dict(
+        id=1, demand_id=1, rental_id=1, carrier_id=1, adjuster_id=1,
+        vehicle_class=VehicleClass.SEDAN,
+        rental_start_date=date(2026, 1, 1), rental_end_date=date(2026, 1, 10),
+        market_rate_at_time=Decimal("45.00"), amount_demanded=Decimal("900.00"),
+        amount_paid=Decimal("810.00"), days_to_resolve=12,
+        resolved_at=datetime(2026, 1, 15, 12, 0, 0),
+    )
+    defaults.update(overrides)
+    return InsurerPayment(**defaults)
+
+
+def test_get_carrier_insurer_payments():
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch("app.api.repo.list_insurer_payments_for_carrier", return_value=[_sample_insurer_payment()]):
+        r = client.get("/insurance-carriers/1/insurer-payments")
+    check(
+        "test_get_carrier_insurer_payments",
+        r.status_code == 200 and len(r.json()) == 1 and r.json()[0]["amount_paid"] == "810.00",
+        r.text,
+    )
+
+
+def test_get_carrier_insurer_payments_carrier_not_found():
+    with patch("app.api.repo.get_insurance_carrier", return_value=None):
+        r = client.get("/insurance-carriers/999/insurer-payments")
+    check("test_get_carrier_insurer_payments_carrier_not_found", r.status_code == 404, r.text)
+
+
+def test_get_carrier_market_rate_exhibit():
+    """The concrete handoff §2.8 exhibit: "this same carrier paid market
+    rate on N prior claims." """
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch(
+             "app.api.repo.get_carrier_market_rate_exhibit",
+             return_value={
+                 "claim_count": 3,
+                 "avg_amount_demanded": Decimal("900.00"),
+                 "avg_amount_paid": Decimal("780.00"),
+                 "avg_market_rate": Decimal("45.00"),
+             },
+         ):
+        r = client.get("/insurance-carriers/1/market-rate-exhibit")
+    check(
+        "test_get_carrier_market_rate_exhibit",
+        r.status_code == 200 and r.json()["claim_count"] == 3 and r.json()["carrier_id"] == 1,
+        r.text,
+    )
+
+
+def test_get_carrier_market_rate_exhibit_no_claims_yet():
+    """A carrier with no resolved insurer_payment rows yet is a valid
+    state (claim_count=0, null averages), not a 404 -- see the route's
+    own docstring."""
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch("app.api.repo.get_carrier_market_rate_exhibit", return_value={"claim_count": 0}):
+        r = client.get("/insurance-carriers/1/market-rate-exhibit")
+    check(
+        "test_get_carrier_market_rate_exhibit_no_claims_yet",
+        r.status_code == 200 and r.json()["claim_count"] == 0 and r.json()["avg_amount_demanded"] is None,
+        r.text,
+    )
+
+
+def test_get_carrier_market_rate_exhibit_carrier_not_found():
+    with patch("app.api.repo.get_insurance_carrier", return_value=None):
+        r = client.get("/insurance-carriers/999/market-rate-exhibit")
+    check("test_get_carrier_market_rate_exhibit_carrier_not_found", r.status_code == 404, r.text)
+
+
+def test_get_rental_insurer_payments():
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch("app.api.repo.list_insurer_payments_for_rental", return_value=[_sample_insurer_payment()]):
+        r = client.get("/rentals/1/insurer-payments")
+    check("test_get_rental_insurer_payments", r.status_code == 200 and len(r.json()) == 1, r.text)
+
+
+def test_get_rental_insurer_payments_rental_not_found():
+    with patch("app.api.repo.get_rental", return_value=None):
+        r = client.get("/rentals/999/insurer-payments")
+    check("test_get_rental_insurer_payments_rental_not_found", r.status_code == 404, r.text)
+
+
+def test_get_insurer_payment_found():
+    with patch("app.api.repo.get_insurer_payment", return_value=_sample_insurer_payment()):
+        r = client.get("/insurer-payments/1")
+    check("test_get_insurer_payment_found", r.status_code == 200 and r.json()["id"] == 1, r.text)
+
+
+def test_get_insurer_payment_not_found():
+    with patch("app.api.repo.get_insurer_payment", return_value=None):
+        r = client.get("/insurer-payments/999")
+    check("test_get_insurer_payment_not_found", r.status_code == 404, r.text)
+
+
 if __name__ == "__main__":
     tests = [
         test_health, test_fleet_out,
@@ -1385,6 +1504,11 @@ if __name__ == "__main__":
         test_create_adjuster_duplicate_at_same_carrier_returns_409,
         test_list_adjusters_for_carrier, test_list_adjusters_for_carrier_not_found,
         test_get_adjuster_found, test_get_adjuster_not_found,
+        test_get_carrier_insurer_payments, test_get_carrier_insurer_payments_carrier_not_found,
+        test_get_carrier_market_rate_exhibit, test_get_carrier_market_rate_exhibit_no_claims_yet,
+        test_get_carrier_market_rate_exhibit_carrier_not_found,
+        test_get_rental_insurer_payments, test_get_rental_insurer_payments_rental_not_found,
+        test_get_insurer_payment_found, test_get_insurer_payment_not_found,
     ]
     for t in tests:
         t()

@@ -90,7 +90,7 @@ from app.models import (
     VehicleClass,
     VehicleStatus,
 )
-from app.models import Adjuster, InsuranceCarrier
+from app.models import Adjuster, InsuranceCarrier, InsurerPayment
 
 app = FastAPI(
     title="Elektrica Dashboard API (Phase 1, internal/local only)",
@@ -1930,4 +1930,97 @@ def get_adjuster(adjuster_id: int, cur=Depends(get_cursor)):
     if adjuster is None:
         raise HTTPException(status_code=404, detail=f"No adjuster with id={adjuster_id}")
     return _adjuster_to_out(adjuster)
+
+
+# --- Insurer payments (migrations/016; handoff §2.8's market-rate exhibit) --
+#
+# Read-only from this API's point of view: elektrica.insurer_payment rows
+# for source='system' are created exclusively by a DB trigger the moment a
+# carrier-recipient elektrica.demand resolves (migrations/016) -- there is
+# NO POST route here that lets a caller fabricate a 'system' row. The
+# historical/legacy import (handoff §2.9) is still export-blocked
+# (docs/OVERNIGHT_DECISIONS.md), so its own write route is deliberately
+# not built yet either -- repo.record_legacy_insurer_payment() exists in
+# the repository layer for when that import is actually being wired, not
+# exposed over HTTP prematurely.
+
+class InsurerPaymentOut(BaseModel):
+    id: int
+    demand_id: int
+    rental_id: int
+    carrier_id: int
+    adjuster_id: Optional[int] = None
+    claim_ref: Optional[str] = None
+    vehicle_class: Optional[str] = None
+    rental_start_date: Optional[date] = None
+    rental_end_date: Optional[date] = None
+    market_rate_at_time: Optional[Decimal] = None
+    amount_demanded: Decimal
+    amount_paid: Decimal
+    days_to_resolve: Optional[int] = None
+    resolved_at: datetime
+    source: str
+    source_ref: Optional[str] = None
+    frozen: bool
+
+
+class CarrierMarketRateExhibitOut(BaseModel):
+    carrier_id: int
+    claim_count: int
+    avg_amount_demanded: Optional[Decimal] = None
+    avg_amount_paid: Optional[Decimal] = None
+    avg_market_rate: Optional[Decimal] = None
+
+
+def _insurer_payment_to_out(p: InsurerPayment) -> InsurerPaymentOut:
+    return InsurerPaymentOut(
+        id=p.id, demand_id=p.demand_id, rental_id=p.rental_id, carrier_id=p.carrier_id,
+        adjuster_id=p.adjuster_id, claim_ref=p.claim_ref,
+        vehicle_class=p.vehicle_class.value if p.vehicle_class else None,
+        rental_start_date=p.rental_start_date, rental_end_date=p.rental_end_date,
+        market_rate_at_time=p.market_rate_at_time, amount_demanded=p.amount_demanded,
+        amount_paid=p.amount_paid, days_to_resolve=p.days_to_resolve,
+        resolved_at=p.resolved_at, source=p.source.value, source_ref=p.source_ref, frozen=p.frozen,
+    )
+
+
+@app.get("/insurance-carriers/{carrier_id}/insurer-payments", response_model=list[InsurerPaymentOut])
+def get_carrier_insurer_payments(carrier_id: int, cur=Depends(get_cursor)):
+    """Handoff §2.8: "filter by carrier, date range, vehicle class ->
+    exportable table for a demand or a JP filing." Date-range/
+    vehicle-class filtering is client-side for now (this route returns
+    every resolved insurer_payment row for the carrier, newest first),
+    same no-query-param-filtering convention as every other list_* route
+    in this file."""
+    if repo.get_insurance_carrier(cur, carrier_id) is None:
+        raise HTTPException(status_code=404, detail=f"No insurance_carrier with id={carrier_id}")
+    return [_insurer_payment_to_out(p) for p in repo.list_insurer_payments_for_carrier(cur, carrier_id)]
+
+
+@app.get("/insurance-carriers/{carrier_id}/market-rate-exhibit", response_model=CarrierMarketRateExhibitOut)
+def get_carrier_market_rate_exhibit(carrier_id: int, cur=Depends(get_cursor)):
+    """The concrete exhibit handoff §2.8 exists for: "this same carrier
+    paid market rate on N prior claims." Returns claim_count=0 and null
+    averages (not 404) for a carrier with no resolved insurer_payment
+    rows yet -- that is a valid, expected state, not an error."""
+    if repo.get_insurance_carrier(cur, carrier_id) is None:
+        raise HTTPException(status_code=404, detail=f"No insurance_carrier with id={carrier_id}")
+    result = repo.get_carrier_market_rate_exhibit(cur, carrier_id)
+    return CarrierMarketRateExhibitOut(carrier_id=carrier_id, **result)
+
+
+@app.get("/rentals/{rental_id}/insurer-payments", response_model=list[InsurerPaymentOut])
+def get_rental_insurer_payments(rental_id: int, cur=Depends(get_cursor)):
+    if repo.get_rental(cur, rental_id) is None:
+        raise HTTPException(status_code=404, detail=f"No rental with id={rental_id}")
+    return [_insurer_payment_to_out(p) for p in repo.list_insurer_payments_for_rental(cur, rental_id)]
+
+
+@app.get("/insurer-payments/{insurer_payment_id}", response_model=InsurerPaymentOut)
+def get_insurer_payment(insurer_payment_id: int, cur=Depends(get_cursor)):
+    payment = repo.get_insurer_payment(cur, insurer_payment_id)
+    if payment is None:
+        raise HTTPException(status_code=404, detail=f"No insurer_payment with id={insurer_payment_id}")
+    return _insurer_payment_to_out(payment)
+
 

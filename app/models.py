@@ -706,3 +706,57 @@ class Adjuster:
         if not name:
             raise ValueError("Adjuster.name cannot be blank")
         self.name = name
+
+
+class InsurerPaymentSource(str, Enum):
+    """Matches elektrica.insurer_payment_source (migrations/016)."""
+    SYSTEM = "system"
+    LEGACY_IMPORT = "legacy_import"
+
+
+@dataclass
+class InsurerPayment:
+    """Mirrors elektrica.insurer_payment (migrations/016) -- handoff
+    §2.8's carrier market-rate exhibit. Rows are normally created by a
+    DB trigger the moment a carrier-recipient elektrica.demand resolves
+    (elektrica.demand_create_insurer_payment_on_resolve()) -- there is
+    deliberately no "create" repository function/route for
+    source='system' rows; application code only ever READS this table.
+    The one write path this dataclass supports is the future historical
+    import (handoff §2.9, still export-blocked) via
+    repository.record_legacy_insurer_payment(), source='legacy_import'
+    only.
+
+    Table is frozen/append-only (REVOKE UPDATE, DELETE) -- same
+    philosophy as elektrica.payment / elektrica.comparable_set. A
+    correction is a new row, never an edit to history."""
+    demand_id: int
+    rental_id: int
+    carrier_id: int
+    amount_demanded: Decimal
+    resolved_at: datetime
+    adjuster_id: Optional[int] = None
+    claim_ref: Optional[str] = None
+    vehicle_class: Optional[VehicleClass] = None
+    rental_start_date: Optional[date] = None
+    rental_end_date: Optional[date] = None
+    market_rate_at_time: Optional[Decimal] = None
+    amount_paid: Decimal = Decimal("0")
+    days_to_resolve: Optional[int] = None
+    source: InsurerPaymentSource = InsurerPaymentSource.SYSTEM
+    source_ref: Optional[str] = None
+    frozen: bool = True
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+
+    def __post_init__(self):
+        if self.amount_demanded < 0:
+            raise ValueError("InsurerPayment.amount_demanded must be >= 0.")
+        if self.amount_paid < 0:
+            raise ValueError("InsurerPayment.amount_paid must be >= 0.")
+        if self.source == InsurerPaymentSource.LEGACY_IMPORT and not self.source_ref:
+            raise ValueError(
+                "source='legacy_import' requires source_ref "
+                "(elektrica.insurer_payment's insurer_payment_source_ref_required_for_legacy CHECK)."
+            )
