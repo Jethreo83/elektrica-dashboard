@@ -951,6 +951,28 @@ def fleet_available(cur=Depends(get_cursor)):
     return [_vehicle_to_out(v) for v in repo.list_vehicles_by_status(cur, VehicleStatus.AVAILABLE)]
 
 
+@app.get("/fleet-board/out")
+def fleet_board_out(cur=Depends(get_cursor)):
+    """Handoff §2.5 literal Out-half shape (body shop/rental type/renter
+    name beside each vehicle) -- for the frontend's Fleet-board screen,
+    which needs more than the bare vehicle rows /fleet/out returns.
+    Plain dict response (no response_model) since this is a read-only
+    board projection, not a schema-backed entity."""
+    return repo.fleet_board_out(cur)
+
+
+@app.get("/fleet-board/available")
+def fleet_board_available(cur=Depends(get_cursor)):
+    """Handoff §2.5 literal Available-half shape -- see
+    repo.fleet_board_available()'s own docstring for the KNOWN SPEC
+    CONFLICT this carries forward rather than silently resolves:
+    migration 015 dropped vehicle.class, so the handoff's "grouped by
+    class" instruction currently has nothing to group by. Every row's
+    `class` key is `null`; grouping is left to the frontend (today: no
+    grouping) until Jed decides what replaces it."""
+    return repo.fleet_board_available(cur)
+
+
 # --- Vehicles (handoff §2.3 vehicle intake; elektrica_app has full
 # SELECT/INSERT/UPDATE on elektrica.vehicle per migration 002, unlike the
 # SELECT-only staff_user gap above -- so these routes are not blocked by
