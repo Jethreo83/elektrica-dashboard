@@ -282,8 +282,8 @@ class DemandIn(BaseModel):
     recipient_type: str
     amount: Decimal
     actor: str
-    carrier_name: Optional[str] = None
-    adjuster_name: Optional[str] = None
+    carrier_id: Optional[int] = None
+    adjuster_id: Optional[int] = None
     prior_demand_id: Optional[int] = None
 
 
@@ -294,6 +294,8 @@ class DemandOut(BaseModel):
     recipient_type: str
     amount: Decimal
     status: str
+    carrier_id: Optional[int] = None
+    adjuster_id: Optional[int] = None
     sent_via: Optional[str] = None
 
 
@@ -590,7 +592,8 @@ def _demand_to_out(d: Demand) -> DemandOut:
     return DemandOut(
         id=d.id, rental_id=d.rental_id, demand_type=d.demand_type.value,
         recipient_type=d.recipient_type.value, amount=d.amount,
-        status=d.status.value, sent_via=d.sent_via,
+        status=d.status.value, carrier_id=d.carrier_id, adjuster_id=d.adjuster_id,
+        sent_via=d.sent_via,
     )
 
 
@@ -930,12 +933,27 @@ def create_demand(rental_id: int, body: DemandIn, cur=Depends(get_cursor)):
     try:
         demand = Demand(
             rental_id=rental_id, demand_type=demand_type, recipient_type=recipient_type,
-            amount=body.amount, carrier_name=body.carrier_name, adjuster_name=body.adjuster_name,
+            amount=body.amount, carrier_id=body.carrier_id, adjuster_id=body.adjuster_id,
             prior_demand_id=body.prior_demand_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return _demand_to_out(repo.create_demand(cur, demand, body.actor))
+    try:
+        return _demand_to_out(repo.create_demand(cur, demand, body.actor))
+    except psycopg2.errors.ForeignKeyViolation as e:
+        # demand.carrier_id_fkey / demand.adjuster_id_fkey (migrations/014) --
+        # caller passed a carrier_id/adjuster_id that doesn't exist. Client
+        # input error, same 500->400 discipline as link_vls_case above.
+        # str(e) (not e.diag.message_primary) -- diag is a read-only
+        # C-level attribute that real psycopg2 errors populate from the
+        # live connection but that cannot be constructed/mocked in a unit
+        # test the same way, so this uses the always-available str(e).
+        raise HTTPException(status_code=400, detail=f"Unknown carrier_id or adjuster_id: {e}")
+    except psycopg2.errors.RaiseException as e:
+        # trg_demand_check_adjuster_carrier_match (migrations/014) -- caller
+        # passed an adjuster_id that belongs to a DIFFERENT carrier than
+        # carrier_id. Also a client-input error, not a server fault.
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/demands/{demand_id}/mark-sent", response_model=DemandOut)

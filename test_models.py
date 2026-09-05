@@ -111,24 +111,24 @@ def test_rental_event_unconfirmed_confirmed_by_optional():
     check("test_rental_event_unconfirmed_confirmed_by_optional", ev.confirmed_by is None)
 
 
-def test_demand_carrier_recipient_requires_carrier_name():
+def test_demand_carrier_recipient_requires_carrier_id():
     try:
         Demand(
             rental_id=1, demand_type=DemandType.PRIMARY_INSURER,
             recipient_type=DemandRecipientType.CARRIER, amount=Decimal("500.00"),
-            carrier_name=None,
+            carrier_id=None,
         )
-        check("test_demand_carrier_recipient_requires_carrier_name", False)
+        check("test_demand_carrier_recipient_requires_carrier_id", False)
     except ValueError:
-        check("test_demand_carrier_recipient_requires_carrier_name", True)
+        check("test_demand_carrier_recipient_requires_carrier_id", True)
 
 
-def test_demand_renter_recipient_no_carrier_name_needed():
+def test_demand_renter_recipient_no_carrier_id_needed():
     d = Demand(
         rental_id=1, demand_type=DemandType.BALANCE_TO_RENTER,
         recipient_type=DemandRecipientType.RENTER, amount=Decimal("120.00"),
     )
-    check("test_demand_renter_recipient_no_carrier_name_needed", d.carrier_name is None)
+    check("test_demand_renter_recipient_no_carrier_id_needed", d.carrier_id is None)
 
 
 def test_demand_draft_cannot_have_send_record():
@@ -288,8 +288,8 @@ if __name__ == "__main__":
         test_rental_event_manual_source_ref_optional,
         test_rental_event_confirmed_requires_confirmed_by,
         test_rental_event_unconfirmed_confirmed_by_optional,
-        test_demand_carrier_recipient_requires_carrier_name,
-        test_demand_renter_recipient_no_carrier_name_needed,
+        test_demand_carrier_recipient_requires_carrier_id,
+        test_demand_renter_recipient_no_carrier_id_needed,
         test_demand_draft_cannot_have_send_record,
         test_demand_sent_status_allows_send_record,
         test_comparable_set_rejects_invalid_date_range,

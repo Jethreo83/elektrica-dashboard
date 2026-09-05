@@ -148,11 +148,19 @@ def main():
 
         print("--- advance to demand_sent, create_demand, mark_demand_sent (as elektrica_app) ---")
         rental = repo.advance_rental_state(cur, rental.id, RentalState.DEMAND_SENT, EventSource.MANUAL, "smoke_role_test")
+
+        cur.execute(
+            "INSERT INTO platform.insurance_carrier (name, created_by, updated_by) "
+            "VALUES (%s, %s, %s) RETURNING id",
+            ("Role Smoke Insurance", "smoke_role_test", "smoke_role_test"),
+        )
+        ids["carrier_id"] = cur.fetchone()["id"]
+
         demand = repo.create_demand(
             cur,
             Demand(
                 rental_id=rental.id, demand_type=DemandType.PRIMARY_INSURER,
-                recipient_type=DemandRecipientType.CARRIER, carrier_name="Role Smoke Insurance",
+                recipient_type=DemandRecipientType.CARRIER, carrier_id=ids["carrier_id"],
                 amount=Decimal("500.00"),
             ),
             "smoke_role_test",

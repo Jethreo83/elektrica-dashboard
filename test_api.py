@@ -75,7 +75,7 @@ def _sample_proposal(**overrides) -> RentalProposal:
 def _sample_demand(**overrides) -> Demand:
     defaults = dict(
         id=1, rental_id=1, demand_type=DemandType.PRIMARY_INSURER,
-        recipient_type=DemandRecipientType.CARRIER, carrier_name="Acme Ins",
+        recipient_type=DemandRecipientType.CARRIER, carrier_id=13,
         amount=Decimal("450.00"),
     )
     defaults.update(overrides)
@@ -469,7 +469,7 @@ def test_create_demand():
             "/rentals/1/demands",
             json={
                 "demand_type": "primary_insurer", "recipient_type": "carrier",
-                "amount": "450.00", "actor": "jed", "carrier_name": "Acme Ins",
+                "amount": "450.00", "actor": "jed", "carrier_id": 13,
             },
         )
     check("test_create_demand_status", r.status_code == 200, r.text)
@@ -486,6 +486,48 @@ def test_create_demand_carrier_without_name_returns_400():
             },
         )
     check("test_create_demand_carrier_without_name_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_demand_unknown_carrier_id_returns_400():
+    """migrations/014's demand.carrier_id_fkey -- a carrier_id that doesn't
+    exist must surface as 400, same 500->400 discipline as every other FK
+    violation in this API (link_vls_case, insurance-carrier adjuster
+    creation, etc.)."""
+    import psycopg2.errors
+    fk_error = psycopg2.errors.ForeignKeyViolation(
+        "insert or update on table \"demand\" violates foreign key constraint \"demand_carrier_id_fkey\""
+    )
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch("app.api.repo.create_demand", side_effect=fk_error):
+        r = client.post(
+            "/rentals/1/demands",
+            json={
+                "demand_type": "primary_insurer", "recipient_type": "carrier",
+                "amount": "450.00", "actor": "jed", "carrier_id": 999999,
+            },
+        )
+    check("test_create_demand_unknown_carrier_id_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_demand_mismatched_adjuster_carrier_returns_400():
+    """migrations/014's trg_demand_check_adjuster_carrier_match -- an
+    adjuster_id belonging to a different carrier than carrier_id must
+    surface as 400, not 500."""
+    import psycopg2.errors
+    raise_error = psycopg2.errors.RaiseException(
+        "demand.adjuster_id 20 belongs to carrier_id 18 but demand.carrier_id is 17 -- "
+        "adjuster must belong to the same carrier the demand is addressed to."
+    )
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch("app.api.repo.create_demand", side_effect=raise_error):
+        r = client.post(
+            "/rentals/1/demands",
+            json={
+                "demand_type": "primary_insurer", "recipient_type": "carrier",
+                "amount": "450.00", "actor": "jed", "carrier_id": 17, "adjuster_id": 20,
+            },
+        )
+    check("test_create_demand_mismatched_adjuster_carrier_returns_400", r.status_code == 400, r.text)
 
 
 def test_mark_demand_sent():

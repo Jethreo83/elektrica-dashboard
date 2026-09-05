@@ -1464,8 +1464,133 @@ header comment ("no insurance_carrier/adjuster tables exist yet"). Now
 that they do, wiring `elektrica.demand` to reference
 `platform.insurance_carrier`/`platform.adjuster` by id instead of free
 text is the natural next step -- but that is a real schema change to an
-existing table with a CHECK constraint
-(`demand_carrier_name_required_for_carrier_recipient`) tying into it, so
-it deserves its own migration + careful review rather than folding into
-this cycle. Logged as the concrete next item rather than left implicit.
+existing table with a CHECK constraint tying into it
+(`demand_carrier_name_required_for_carrier_recipient`), so it deserves
+its own migration + careful review rather than folding into this cycle.
+Logged as the concrete next item rather than left implicit.
+
+## 2026-09-05 (cron cycle) — elektrica.demand carrier/adjuster FK wiring, staging-only
+
+Closed the concrete "next up" item logged at the end of the previous
+entry: `elektrica.demand.carrier_name`/`adjuster_name` (migration 006
+PLACEHOLDER free text) now reference `platform.insurance_carrier`/
+`platform.adjuster` (migration 013) by id.
+
+- **`migrations/014_elektrica_demand_carrier_fk.sql`** (staging-only, new
+  migration): adds `carrier_id BIGINT REFERENCES platform.insurance_carrier`
+  and `adjuster_id BIGINT REFERENCES platform.adjuster` to
+  `elektrica.demand`; backfills both from the 3 existing staging smoke
+  rows' `carrier_name` values (find-or-create a matching
+  `platform.insurance_carrier` row by exact name, since these are fresh
+  smoke-test names with no alias history yet); drops the old
+  `demand_carrier_name_required_for_carrier_recipient` CHECK and replaces
+  it with `demand_carrier_required_for_carrier_recipient` (same shape,
+  `carrier_id IS NOT NULL` instead of `carrier_name IS NOT NULL`); drops
+  the now-empty `carrier_name`/`adjuster_name` columns. **New invariant
+  this migration adds, not present before:** a `BEFORE INSERT OR UPDATE`
+  trigger (`trg_demand_check_adjuster_carrier_match`) rejects any row
+  where `adjuster_id` is set but belongs to a DIFFERENT carrier than
+  `carrier_id` -- a plain FK/CHECK can't express that cross-table
+  column-equality rule, hence the trigger. No new grants needed:
+  `elektrica_app` already had SELECT/INSERT/UPDATE on `elektrica.demand`
+  (migration 006) and SELECT on both `platform.*` tables (migration 013).
+- **`scripts/verify_014.sql`**: 7 checks -- create with real carrier+
+  adjuster and confirm the join reads back correctly, confirm
+  `carrier_name`/`adjuster_name` columns are actually gone
+  (`information_schema.columns`), missing-`carrier_id`-when-
+  recipient=carrier rejected, bad `carrier_id` FK rejected, mismatched
+  adjuster/carrier rejected (INSERT path), renter-recipient demand still
+  needs no `carrier_id` (confirms the new CHECK didn't over-tighten), and
+  the mismatch trigger also fires on UPDATE, not just INSERT. All 7
+  passed against real staging Postgres.
+- **App layer**: `app/models.py`'s `Demand` dataclass swaps
+  `carrier_name`/`adjuster_name` (str) for `carrier_id`/`adjuster_id`
+  (int), `__post_init__`'s recipient-type check updated to match;
+  `app/repository.py`'s `create_demand`/`_demand_from_row` updated to the
+  new columns; `app/api.py`'s `DemandIn`/`DemandOut` swap to
+  `carrier_id`/`adjuster_id` ints, `_demand_to_out` echoes them back, and
+  `create_demand`'s route gains two new except clauses mapping
+  `psycopg2.errors.ForeignKeyViolation` (bad carrier_id/adjuster_id) and
+  `psycopg2.errors.RaiseException` (the new cross-carrier trigger) to
+  400 -- same recurring 500->4xx discipline this repo has hit on every
+  prior FK-touching route (link_vls_case, document-template duplicate,
+  insurance-carrier/adjuster creation). Used `str(e)` rather than
+  `e.diag.message_primary` for the error detail -- `psycopg2.Error.diag`
+  is a read-only C-level attribute that a unit test can't construct on a
+  bare `Error()` instance the way a real live connection populates it,
+  so `str(e)` is what's actually testable without a real DB, and it
+  carries the same information for a 400 response anyway.
+- Updated the two DB-touching smoke scripts
+  (`scripts/_smoke_repository.py`, `scripts/_smoke_elektrica_app_role.py`)
+  to create a real `platform.insurance_carrier` row and pass its id
+  instead of a bare `carrier_name` string, since the column no longer
+  exists.
+- 22 new/updated `test_api.py`/`test_models.py` cases (140/140 passed,
+  up from 138/138): the two demand-model tests renamed
+  `..._requires_carrier_name`/`..._no_carrier_name_needed` ->
+  `..._requires_carrier_id`/`..._no_carrier_id_needed` with matching
+  bodies, plus two brand-new API tests
+  (`test_create_demand_unknown_carrier_id_returns_400`,
+  `test_create_demand_mismatched_adjuster_carrier_returns_400`) covering
+  the two new except clauses.
+
+**Applied to real staging Postgres and live-verified over real HTTP**
+(uvicorn on port 8611, `neondb_owner`-class `DATABASE_URL` passed inline
+on the launch command per this repo's own documented Windows
+background-process env-var gotcha). Migration applied statement-by-
+statement via a one-off psycopg2 script (no `psql` in this environment,
+same as every prior migration) -- hit the exact CHECK-violation-on-
+backfill issue the migration file's own header now documents: the first
+draft dropped `carrier_name`/`adjuster_name` outright assuming no real
+data existed, but staging already had 3 smoke rows with real
+`carrier_name` values from prior cycles' runs (`Acme Insurance`,
+`Role Smoke Insurance` x2) that violated the new `carrier_id`-based
+CHECK the moment it was added. Fixed by adding the backfill INSERT/UPDATE
+step described above before the DROP COLUMN, confirmed via a direct
+`information_schema.columns` query that no stale-partial-migration state
+was left from the failed first attempt (columns/indexes from statements
+1-3 had already committed independently before statement 5 failed, since
+each statement commits on its own in this repo's split-execution
+discipline -- re-ran only the not-yet-applied remaining statements
+rather than the whole file a second time). Once schema was correct: ran
+uvicorn, created a real demand (id=11) on rental id=1 with carrier_id=13
+(Geico) + adjuster_id=17 (Bob Adjuster, correctly under Geico) -> 200 ->
+confirmed a mismatched adjuster_id=19 (belongs to a different carrier)
+against carrier_id=13 -> 400 with the trigger's own message -> confirmed
+carrier_id=999999 (nonexistent) -> 400 -> confirmed omitting carrier_id
+entirely on a carrier-recipient demand -> 400 (app-layer, pre-DB-round-
+trip) -> marked demand id=11 sent via fax -> 200, `carrier_id`/
+`adjuster_id` echoed correctly throughout. Server killed after
+(`netstat`-confirmed PID, not the launch command's own reported PID, per
+this repo's own documented lesson from the migration-013 cycle); no
+LISTENING socket left on 8611. All scratch files holding the staging
+connection string deleted immediately after use.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every other smoke run in this repo): `platform.insurance_carrier`
+ids 15/16 (backfilled from migration 014's own INSERT, `created_by`=
+`migration_014_backfill`) plus 17/18 (verify_014.sql's own test rows);
+`platform.adjuster` ids 19/20; `elektrica.demand` id 11 (this cycle's
+live HTTP smoke) plus ids 6/7 (verify_014.sql's own rows) and the
+pre-existing ids 1/3/5 (now pointing at carrier_id=15/16 instead of
+carrying free-text `carrier_name`, via the backfill).
+
+**Not done / explicitly deferred:** the historical `insurer_payment`
+import (handoff §2.9) remains genuinely export-blocked, unchanged by
+this cycle. Migration 014 has NOT been promoted to production -- it's
+new schema built on top of migration 006/013, both themselves still
+staging-only, so this stays staging-only too, same inheritance logic as
+every dependent migration in this repo. No auth/session layer on any
+route; frontend not started; migration 007's `vls.case` grant-scope flag
+for Jed still open (staging-only, not urgent).
+
+**Next up:** with carrier/adjuster now properly FK-wired, the natural
+next buildable items are (a) a `GET /rentals/{id}/demands` list route --
+currently there's no way to list a rental's demands, only create one and
+mark it sent, a real gap for the dashboard's own use, not carried over
+from any handoff placeholder; (b) the renter-provisioning JotForm intake
+flow (handoff §2.2) that `docs/BACKLOG.md` already flags needs
+`platform.match_or_create_person()`, not bespoke matching logic; (c)
+frontend, still fully unstarted. Logging (a) as the most concrete
+next item since it's a plain gap in an otherwise-complete route family.
 

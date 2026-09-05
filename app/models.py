@@ -315,15 +315,21 @@ class Toll:
 
 @dataclass
 class Demand:
-    """Mirrors elektrica.demand (migrations/006). status value set and
-    carrier_name/adjuster_name are PLACEHOLDER -- see DemandStatus
-    docstring and migrations/006 header."""
+    """Mirrors elektrica.demand (migrations/006, carrier/adjuster FK-wired
+    by migrations/014). status value set is still PLACEHOLDER -- see
+    DemandStatus docstring and migrations/006 header. carrier_id/
+    adjuster_id point at platform.insurance_carrier/platform.adjuster
+    (migrations/013) -- the old carrier_name/adjuster_name free-text
+    columns migrations/006 flagged as temporary are gone as of
+    migrations/014; callers must resolve a real carrier/adjuster id
+    first (e.g. via find_insurance_carrier_by_name_or_alias) rather than
+    passing a bare name."""
     rental_id: int
     demand_type: DemandType
     recipient_type: DemandRecipientType
     amount: Decimal
-    carrier_name: Optional[str] = None
-    adjuster_name: Optional[str] = None
+    carrier_id: Optional[int] = None
+    adjuster_id: Optional[int] = None
     generated_document_id: Optional[int] = None
     sent_via: Optional[str] = None   # platform.outbound_channel value, kept as str here (cross-schema enum)
     sent_at: Optional[datetime] = None
@@ -336,11 +342,12 @@ class Demand:
     updated_by: Optional[str] = None
 
     def __post_init__(self):
-        # Mirrors demand_carrier_name_required_for_carrier_recipient CHECK.
-        if self.recipient_type == DemandRecipientType.CARRIER and not self.carrier_name:
+        # Mirrors demand_carrier_required_for_carrier_recipient CHECK
+        # (migrations/014 -- replaced the old carrier_NAME-based CHECK).
+        if self.recipient_type == DemandRecipientType.CARRIER and not self.carrier_id:
             raise ValueError(
-                "recipient_type='carrier' requires carrier_name "
-                "(elektrica.demand's demand_carrier_name_required_for_carrier_recipient CHECK)."
+                "recipient_type='carrier' requires carrier_id "
+                "(elektrica.demand's demand_carrier_required_for_carrier_recipient CHECK)."
             )
         # Mirrors demand_draft_has_no_send_record CHECK.
         if self.status == DemandStatus.DRAFT and (self.sent_via or self.sent_at):

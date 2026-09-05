@@ -7,6 +7,21 @@ from scratch or, worse, do it differently by accident.
 
 ---
 
+## RESOLVED 2026-09-05 (cron cycle) — elektrica.demand carrier/adjuster FK wiring
+
+**What:** `docs/BUILD_LOG.md`'s migration-013 entry flagged
+`elektrica.demand.carrier_name`/`adjuster_name` (migration 006 PLACEHOLDER
+free text) as the natural next item to wire to `platform.insurance_carrier`/
+`platform.adjuster` (migration 013) once those tables existed. Closed
+this cycle by `migrations/014_elektrica_demand_carrier_fk.sql` — see
+`docs/BUILD_LOG.md`'s matching entry for the full writeup (backfill,
+new cross-carrier adjuster-match trigger, app-layer changes, 140/140
+tests, live HTTP verification against real staging). Nothing further to
+do here; kept as a resolved marker so a future session doesn't rediscover
+this as still-open.
+
+---
+
 ## Staff provisioning must create/link a `platform.person` row (Jed, 2026-09-04, relayed by hermes)
 
 **Decision:** staff provisioning should create (or match-and-link) a

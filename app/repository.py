@@ -445,7 +445,7 @@ def create_demand(cur, demand: Demand, actor: str) -> Demand:
     cur.execute(
         """
         INSERT INTO elektrica.demand (
-            rental_id, demand_type, recipient_type, carrier_name, adjuster_name,
+            rental_id, demand_type, recipient_type, carrier_id, adjuster_id,
             amount, generated_document_id, sent_via, sent_at, status,
             prior_demand_id, created_by, updated_by
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -453,7 +453,7 @@ def create_demand(cur, demand: Demand, actor: str) -> Demand:
         """,
         (
             demand.rental_id, demand.demand_type.value, demand.recipient_type.value,
-            demand.carrier_name, demand.adjuster_name, demand.amount,
+            demand.carrier_id, demand.adjuster_id, demand.amount,
             demand.generated_document_id, demand.sent_via, demand.sent_at,
             demand.status.value, demand.prior_demand_id, actor, actor,
         ),
@@ -521,7 +521,7 @@ def _demand_from_row(row) -> Demand:
     return Demand(
         id=row["id"], rental_id=row["rental_id"], demand_type=DemandType(row["demand_type"]),
         recipient_type=DemandRecipientType(row["recipient_type"]),
-        carrier_name=row["carrier_name"], adjuster_name=row["adjuster_name"],
+        carrier_id=row["carrier_id"], adjuster_id=row["adjuster_id"],
         amount=row["amount"], generated_document_id=row["generated_document_id"],
         sent_via=row["sent_via"], sent_at=row["sent_at"], status=DemandStatus(row["status"]),
         prior_demand_id=row["prior_demand_id"],

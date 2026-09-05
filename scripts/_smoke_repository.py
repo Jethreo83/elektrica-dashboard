@@ -129,11 +129,21 @@ def main():
 
         print("--- advance to demand_sent, create demand ---")
         rental = repo.advance_rental_state(cur, rental.id, RentalState.DEMAND_SENT, EventSource.MANUAL, "smoke_test")
+
+        print("--- create insurance carrier for demand.carrier_id (migrations/013+014) ---")
+        cur.execute(
+            "INSERT INTO platform.insurance_carrier (name, created_by, updated_by) "
+            "VALUES (%s, %s, %s) RETURNING id",
+            ("Smoke Acme Insurance", "smoke_test", "smoke_test"),
+        )
+        ids["carrier_id"] = cur.fetchone()["id"]
+        print(f"  carrier_id={ids['carrier_id']}")
+
         demand = repo.create_demand(
             cur,
             Demand(
                 rental_id=rental.id, demand_type=DemandType.PRIMARY_INSURER,
-                recipient_type=DemandRecipientType.CARRIER, carrier_name="Acme Insurance",
+                recipient_type=DemandRecipientType.CARRIER, carrier_id=ids["carrier_id"],
                 amount=Decimal("450.00"),
             ),
             "smoke_test",
