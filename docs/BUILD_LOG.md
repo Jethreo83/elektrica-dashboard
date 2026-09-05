@@ -1636,3 +1636,129 @@ migration 007's `vls.case` grant-scope flag for Jed still open.
 entries, not bespoke matching logic. Frontend (c) remains fully
 unstarted and is the other open front.
 
+## 2026-09-05 (cron cycle, later still) -- JotForm renter-intake flow (handoff §2.2 step 1), real end to end
+
+Closed item (b) from the previous entry: no schema change, pure app-layer
+work sitting on migration 001's already-existing `elektrica.renter` /
+`platform.person` / RLS structure. Also closed a real permission gap
+discovered while building it.
+
+**Discovered first, by direct query against real staging Postgres (not
+assumed from the migration file's comments alone):** `platform.match_or_create_person()`
+is `SECURITY DEFINER`, owned by `neondb_owner`, with `EXECUTE` granted
+ONLY to `neondb_owner` and `platform_identity_service` (`REVOKE ALL`
+first). `elektrica_app` has **zero** role memberships at all --
+confirmed via `pg_auth_members`, not just "no grant on this one
+function": it cannot `SET ROLE platform_identity_service` to reach the
+function even indirectly. This matters because `app/api.py`'s
+`get_cursor()` dependency optionally does `SET ROLE elektrica_app`
+(`ELEKTRICA_DB_SET_ROLE`) for exactly the reason app/db.py's own
+docstring documents -- exercising real least-privilege grants, not a
+superuser connection. If the intake route had reused `get_cursor()`,
+turning that env var on in any deployment would silently break renter
+intake with a raw `psycopg2.errors.InsufficientPrivilege` (500), not a
+graceful error.
+
+**Fix:** new `app/api.py` dependency `get_privileged_cursor()` --
+connects via the same `ELEKTRICA_DB_ENV_VAR`-named connection string but
+ALWAYS skips `SET ROLE` (ignores `ELEKTRICA_DB_SET_ROLE` entirely), so it
+authenticates as whatever LOGIN role the connection string names
+(`neondb_owner`-class in every environment this repo has run in so
+far -- the same role docs/BACKLOG.md already documents as the
+sanctioned admin-script escape hatch for `platform.person` writes, not
+a new privilege boundary). Used only by the one new route below.
+
+- **`app/repository.py`**: `match_or_create_and_link_renter()` --
+  `SET ROLE platform_identity_service`, calls
+  `platform.match_or_create_person()` (positional args matching its real
+  signature, confirmed by `pg_get_functiondef` against staging:
+  `p_first_name, p_last_name, p_date_of_birth, p_email_normalized,
+  p_phone_normalized, p_source_project, p_submitted_by`, `source_project`
+  hardcoded `'elektrica'`), then `RESET ROLE` before touching
+  `elektrica.renter` (`platform_identity_service` has no grants on the
+  `elektrica` schema at all, by design -- would fail if not reset).
+  Branches on `match_status`: `attached`/`created` call the existing
+  `create_renter_for_existing_person()`; `queued` deliberately returns
+  `renter=None` and the real `queue_id` -- per `docs/BACKLOG.md`'s
+  explicit rule (repeated twice in that file already), a queued match
+  must never be treated as linked. New `RenterIntakeResult` dataclass
+  (`match_status`, `person_id`, `queue_id`, `renter`) since `queued`'s
+  no-renter-yet shape doesn't fit the existing `Renter` dataclass.
+- **`app/api.py`**: `get_privileged_cursor()` (see above);
+  `RenterIntakeIn`/`RenterIntakeOut` schemas; `POST /renters/intake`.
+  Route body collects `first_name`/`last_name`/`actor` (required) plus
+  optional `date_of_birth`/`email`/`phone`/`jotform_submission_ref`/
+  `drive_folder_ref` -- handoff §2.2's address/insurance/billed-to fields
+  are explicitly NOT collected here (no schema column exists for any of
+  them yet; flagged in the route's own docstring as a real scope gap,
+  not silently dropped). Does not normalize email/phone before calling
+  the repository function -- flagged in the route docstring as a real
+  gap (no normalization utility exists in this codebase yet) and logged
+  below, not silently done wrong.
+- **`test_api.py`**: `get_privileged_cursor` added to the same mocked
+  dependency-override pattern as `get_cursor`; 3 new cases
+  (`test_intake_renter_attached`, `test_intake_renter_created`,
+  `test_intake_renter_queued_has_no_renter`), the last one asserting
+  `renter is None` specifically to guard the queued-must-not-link rule
+  above. 145/145 pytest (up from 142/142), 118/118 manual runner (up
+  from 115/115), both registered in the manual `__main__` list.
+
+**Live-verified against real staging Postgres, two layers deep:**
+1. Direct psycopg2 script exercising the exact `SET ROLE
+   platform_identity_service` -> call -> `RESET ROLE` -> insert sequence
+   the repository function performs: first call with a fresh unique
+   email -> `created` (person_id=36); identical second call with the
+   SAME email -> `attached`, same person_id=36 -- proving the identity
+   match itself works before trusting the app layer on top of it.
+2. Real uvicorn (port 8620, `neondb_owner`-class `DATABASE_URL` inline on
+   the launch command, no `ELEKTRICA_DB_SET_ROLE` set -- matches this
+   route's actual intended deploy shape) driving `POST /renters/intake`
+   over real HTTP for all three outcomes: `created` (person_id=38, then
+   39 with a fresh email) -> `attached` (second call, same email,
+   correctly returned person_id=39 again with the SAME renter_id=13,
+   not a duplicate) -> `queued` (seeded a real `platform.person` row
+   with a distinct last_name+DOB first, then submitted a different
+   first_name against that same last_name+DOB -> got back
+   `match_status=queued`, `queue_id=2`, `renter=null`). Directly queried
+   `elektrica.renter` afterward to confirm NO row was created for the
+   queued person_id -- the withholding behavior is real, not just
+   returned-but-ignored. Server killed after
+   (`netstat`-confirmed PID, not the launch command's own reported PID);
+   confirmed no LISTENING socket left on 8620. All scratch DSN files
+   (including two stale ones left over from a PRIOR cycle, dated
+   2026-09-04 -- `eleks_staging_owner.txt`, `uvicorn_smoke.log` -- found
+   and deleted this cycle as cleanup debt, not new residue) deleted.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every other smoke run in this repo): `platform.person` ids
+36/37/38/39; `elektrica.renter` ids 11/12/13; `platform.person_match_queue`
+id 2 (status `pending` -- a real, currently-unresolved queue entry, left
+deliberately since resolving it requires an actual human confirm-or-split
+decision this cycle correctly does not make unilaterally).
+
+**New backlog item (not urgent, logged not silently done wrong):** no
+email/phone normalization utility exists anywhere in this codebase.
+`POST /renters/intake` passes JotForm-submitted email/phone straight
+through to `platform.match_or_create_person()`, whose exact-match step
+does a literal string comparison against already-normalized
+`platform.person` rows -- un-normalized input (mixed case email, phone
+with punctuation/formatting) will silently under-match and create
+duplicate `platform.person` rows instead of attaching. Added to
+`docs/BACKLOG.md`.
+
+**Not done / explicitly deferred (unchanged):** `insurer_payment` import
+still export-blocked; migrations 006/013/014 remain staging-only pending
+Jed's review; no auth/session layer on any human-operated route (the new
+`/renters/intake` route has the SAME standing gap as every other route
+in this file -- it is not bot-gated like `/rentals/{id}/proposals`,
+since a JotForm webhook caller isn't the same shape as the bot-proposal
+contract; flagged, not assumed); migration 007's `vls.case` grant-scope
+flag for Jed still open; frontend not started.
+
+**Next up:** with renter intake now real, remaining concrete backend
+gaps are (a) the email/phone normalization utility just flagged above,
+(b) resolving `platform.person_match_queue` entries (no admin action
+exists yet to confirm-or-split a queued match -- this cycle's own
+queue_id=2 row is a live example sitting unresolved), and (c) frontend,
+still fully unstarted.
+

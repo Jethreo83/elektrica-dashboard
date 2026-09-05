@@ -16,7 +16,7 @@ from unittest.mock import patch
 import psycopg2.errors
 from fastapi.testclient import TestClient
 
-from app.api import app, get_cursor
+from app.api import app, get_cursor, get_privileged_cursor
 from app.models import (
     Adjuster, ComparableSet, Communication, CommunicationChannel, CommunicationDirection,
     CommunicationMatchStatus, ComplianceItem, ComplianceItemStatus,
@@ -36,6 +36,7 @@ def _override_cursor():
 
 
 app.dependency_overrides[get_cursor] = _override_cursor
+app.dependency_overrides[get_privileged_cursor] = _override_cursor
 client = TestClient(app)
 
 
@@ -254,6 +255,52 @@ def test_create_renter():
         r = client.post("/renters", json={"person_id": 11, "actor": "jed"})
     check("test_create_renter_status", r.status_code == 200, r.text)
     check("test_create_renter_body", r.json()["person_id"] == 11)
+
+
+def test_intake_renter_attached():
+    """First-time renter whose identity exactly matches an existing
+    platform.person (phone/email match) -- match_status='attached'."""
+    from app.repository import RenterIntakeResult
+    result = RenterIntakeResult(match_status="attached", person_id=11, queue_id=None, renter=_sample_renter())
+    with patch("app.api.repo.match_or_create_and_link_renter", return_value=result):
+        r = client.post("/renters/intake", json={
+            "first_name": "Jane", "last_name": "Doe", "actor": "jotform_bot",
+            "email": "jane@example.com",
+        })
+    check("test_intake_renter_attached_status", r.status_code == 200, r.text)
+    check("test_intake_renter_attached_match_status", r.json()["match_status"] == "attached")
+    check("test_intake_renter_attached_renter_present", r.json()["renter"] is not None)
+
+
+def test_intake_renter_created():
+    """No match found -- platform.match_or_create_person() creates a new
+    platform.person row, match_status='created'."""
+    from app.repository import RenterIntakeResult
+    result = RenterIntakeResult(match_status="created", person_id=42, queue_id=None, renter=_sample_renter(id=2, person_id=42))
+    with patch("app.api.repo.match_or_create_and_link_renter", return_value=result):
+        r = client.post("/renters/intake", json={
+            "first_name": "New", "last_name": "Renter", "actor": "jotform_bot",
+        })
+    check("test_intake_renter_created_status", r.status_code == 200, r.text)
+    check("test_intake_renter_created_match_status", r.json()["match_status"] == "created")
+    check("test_intake_renter_created_person_id", r.json()["person_id"] == 42)
+
+
+def test_intake_renter_queued_has_no_renter():
+    """Close-but-not-exact name+DOB match -- queues to
+    platform.person_match_queue for human review. Per docs/BACKLOG.md's
+    explicit rule, the response must NOT carry a linked renter."""
+    from app.repository import RenterIntakeResult
+    result = RenterIntakeResult(match_status="queued", person_id=11, queue_id=7, renter=None)
+    with patch("app.api.repo.match_or_create_and_link_renter", return_value=result):
+        r = client.post("/renters/intake", json={
+            "first_name": "Jane", "last_name": "Doe", "actor": "jotform_bot",
+            "date_of_birth": "1990-01-01",
+        })
+    check("test_intake_renter_queued_status", r.status_code == 200, r.text)
+    check("test_intake_renter_queued_match_status", r.json()["match_status"] == "queued")
+    check("test_intake_renter_queued_queue_id", r.json()["queue_id"] == 7)
+    check("test_intake_renter_queued_no_renter", r.json()["renter"] is None)
 
 
 def test_get_renter_found():
@@ -1139,6 +1186,7 @@ if __name__ == "__main__":
         test_update_vehicle_position, test_update_vehicle_position_not_found_returns_404,
         test_create_renter, test_get_renter_found, test_get_renter_not_found,
         test_get_renter_by_person_found, test_get_renter_by_person_not_found,
+        test_intake_renter_attached, test_intake_renter_created, test_intake_renter_queued_has_no_renter,
         test_create_rental, test_create_rental_bad_billed_to,
         test_get_rental_found, test_get_rental_not_found,
         test_transition_rental_success, test_transition_rental_illegal_returns_400,

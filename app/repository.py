@@ -18,6 +18,7 @@ neondb_owner, so there is no accidental bypass path from this layer.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
@@ -115,6 +116,97 @@ def _renter_from_row(row) -> Renter:
         jotform_submission_ref=row["jotform_submission_ref"],
         drive_folder_ref=row["drive_folder_ref"],
         created_at=row["created_at"], created_by=row["created_by"],
+    )
+
+
+@dataclass
+class RenterIntakeResult:
+    """Return shape for match_or_create_and_link_renter() -- deliberately
+    NOT the same as Renter, because 'queued' is a real third outcome with
+    no linked elektrica.renter row yet (see that function's docstring)."""
+    match_status: str          # 'attached' | 'queued' | 'created'
+    person_id: int
+    queue_id: Optional[int] = None
+    renter: Optional[Renter] = None
+
+
+def match_or_create_and_link_renter(
+    cur, first_name: str, last_name: str, actor: str,
+    date_of_birth: Optional[date] = None,
+    email_normalized: Optional[str] = None,
+    phone_normalized: Optional[str] = None,
+    jotform_submission_ref: Optional[str] = None,
+    drive_folder_ref: Optional[str] = None,
+) -> RenterIntakeResult:
+    """The handoff §2.2 step-1 JotForm intake path, real end to end:
+    resolves identity via platform.match_or_create_person() (through the
+    platform_identity_service role, never a bespoke matching query --
+    per docs/BACKLOG.md's explicit instruction, repeated twice in that
+    file for staff and renter provisioning respectively) and, depending
+    on the result, links/creates the elektrica.renter row.
+
+    REQUIRES a privileged cursor (app.api.get_privileged_cursor(), NOT
+    get_cursor()) -- see that function's docstring for exactly why:
+    elektrica_app has no grant on or membership to
+    platform_identity_service, confirmed by direct query against real
+    staging Postgres this cycle (pg_auth_members had zero matching rows).
+
+    Sequencing within this one transaction:
+      1. SET ROLE platform_identity_service, call
+         platform.match_or_create_person() (SECURITY DEFINER -- runs as
+         its owner regardless of caller role, but EXECUTE itself is
+         still grant-checked against the CURRENT role, hence the SET
+         ROLE first).
+      2. RESET ROLE back to the connection's original login role before
+         touching elektrica.renter -- platform_identity_service has no
+         grants on the elektrica schema at all (by design, same
+         least-privilege split as every other role in this repo), so
+         the renter INSERT/SELECT below would fail under it.
+      3. Branch on match_status:
+         - 'attached' or 'created': the identity is resolved with
+           confidence -- link (or find-existing) the elektrica.renter
+           row via create_renter_for_existing_person(), same as the
+           already-existing POST /renters route.
+         - 'queued': per docs/BACKLOG.md's explicit rule, the caller
+           must NOT treat this person_id as linked yet. Deliberately
+           does NOT create an elektrica.renter row -- returns
+           renter=None and the real queue_id so the API layer can
+           surface it for human confirm-or-split. Whoever resolves the
+           queue entry (a future admin action, not built yet) is
+           responsible for creating the renter link once a human
+           confirms the match.
+    """
+    cur.execute("SET ROLE platform_identity_service")
+    try:
+        cur.execute(
+            """
+            SELECT * FROM platform.match_or_create_person(%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (first_name, last_name, date_of_birth, email_normalized,
+             phone_normalized, "elektrica", actor),
+        )
+        match_row = cur.fetchone()
+    finally:
+        cur.execute("RESET ROLE")
+
+    person_id = match_row["person_id"]
+    match_status = match_row["match_status"]
+    queue_id = match_row["queue_id"]
+
+    if match_status == "queued":
+        return RenterIntakeResult(
+            match_status=match_status, person_id=person_id,
+            queue_id=queue_id, renter=None,
+        )
+
+    renter = create_renter_for_existing_person(
+        cur, person_id, actor,
+        jotform_submission_ref=jotform_submission_ref,
+        drive_folder_ref=drive_folder_ref,
+    )
+    return RenterIntakeResult(
+        match_status=match_status, person_id=person_id,
+        queue_id=None, renter=renter,
     )
 
 

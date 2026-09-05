@@ -7,6 +7,43 @@ from scratch or, worse, do it differently by accident.
 
 ---
 
+## NEW 2026-09-05 (cron cycle) — no email/phone normalization utility exists
+
+**What:** `platform.match_or_create_person()`'s exact-match step does a
+literal string-equality comparison against `platform.person.email_normalized`/
+`phone_normalized` — those columns are already normalized at rest
+(lowercased email, presumably digit-only phone), but nothing in this
+codebase normalizes an INCOMING value before passing it in. The new
+`POST /renters/intake` route (handoff §2.2 step 1, built this cycle —
+see `docs/BUILD_LOG.md`) passes JotForm-submitted email/phone straight
+through unmodified.
+
+**Why this matters:** a real JotForm submission with `Jane@Example.com`
+or a phone number with dashes/parens will silently fail to match an
+existing `Jane@example.com`/digit-only phone row and create a DUPLICATE
+`platform.person` — the exact failure mode `match_or_create_person()`
+exists to prevent, just moved one layer up to a normalization gap
+instead of a matching-logic gap.
+
+**What to do when this is next touched:** write one shared normalization
+function (lowercase+strip email; strip non-digits from phone, matching
+whatever format `platform.person.phone_normalized` actually uses today —
+check real staging rows before guessing the format) and call it from
+`POST /renters/intake` before passing values to
+`repo.match_or_create_and_link_renter()`. Given convention #1/#2 in this
+codebase (shared primitives live in `platform.*`, not duplicated
+per-project), check whether VLS/Collision already normalize inline
+before their own person-matching calls — if so, this should become a
+shared `platform` helper, not an Elektrica-local one, same lesson as the
+document-generator placement correction (`docs/OVERNIGHT_DECISIONS.md`,
+2026-09-04).
+
+**Not urgent — no action needed until:** a real JotForm webhook is wired
+to this route (still manual/API-only today) or Jed reports a duplicate-
+person symptom that traces back to this.
+
+---
+
 ## RESOLVED 2026-09-05 (cron cycle) — elektrica.demand carrier/adjuster FK wiring
 
 **What:** `docs/BUILD_LOG.md`'s migration-013 entry flagged

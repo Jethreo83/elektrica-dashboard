@@ -120,6 +120,36 @@ def get_cursor():
         yield cur
 
 
+def get_privileged_cursor():
+    """FastAPI dependency for the few routes that need a connection whose
+    LOGIN role itself is allowed to call platform.match_or_create_person()
+    -- currently only POST /renters/intake (see
+    app.repository.match_or_create_and_link_renter()'s docstring).
+
+    Confirmed by direct query against real staging Postgres this cycle:
+    platform.match_or_create_person() is SECURITY DEFINER with EXECUTE
+    granted ONLY to `neondb_owner` and `platform_identity_service`
+    (REVOKE ALL first, per VLS migration 004/008's own discipline) --
+    `elektrica_app` has neither a direct grant nor role membership to
+    either one (checked pg_auth_members: zero rows). So a connection that
+    has already SET ROLE elektrica_app (get_cursor()'s behavior whenever
+    ELEKTRICA_DB_SET_ROLE is configured) would get a bare permission-denied
+    from Postgres calling this function -- not a graceful 403, a raw 500.
+
+    Deliberately ignores ELEKTRICA_DB_SET_ROLE/get_db_set_role() -- ALWAYS
+    connects with no SET ROLE, i.e. as whatever LOGIN role the env var's
+    connection string authenticates as (neondb_owner-class in every
+    environment this repo has run in so far). This is the exact same
+    "admin-script escape hatch" pattern app/db.py's own module docstring
+    and docs/BACKLOG.md already document for person-row creation --
+    intentional, not an oversight, and not a new privilege boundary: it
+    only reaches a function neondb_owner already owns/can call directly.
+    """
+    env_var = get_db_env_var()
+    with db.cursor(env_var, set_role=None) as cur:
+        yield cur
+
+
 def get_bot_api_key_env_var() -> str:
     return os.environ.get("ELEKTRICA_BOT_API_KEY_ENV_VAR", "ELEKTRICA_BOT_API_KEY")
 
@@ -210,6 +240,51 @@ class RenterIn(BaseModel):
     actor: str
     jotform_submission_ref: Optional[str] = None
     drive_folder_ref: Optional[str] = None
+
+
+class RenterIntakeIn(BaseModel):
+    """Handoff §2.2 step 1 literal contract: 'Renter completes a JotForm
+    at the body shop ... identity, address, insurance, who is billed.
+    Auto-creates a Drive folder.' This is the intake-side counterpart to
+    RenterIn -- RenterIn links an already-resolved person_id, this route
+    performs the resolution itself via
+    repo.match_or_create_and_link_renter() (platform.match_or_create_person(),
+    never bespoke matching logic, per docs/BACKLOG.md).
+
+    Only first_name/last_name/actor are required -- date_of_birth/email/
+    phone are all optional inputs to the SAME underlying match function
+    (a JotForm submission may legitimately supply only some of them), but
+    supplying NEITHER email NOR phone NOR (last_name+date_of_birth) means
+    match_or_create_person() has nothing to match on and will always
+    create a new person -- that is the function's own documented
+    behavior, not a bug introduced by this route.
+
+    address/insurance/who-is-billed (also mentioned in handoff §2.2) are
+    NOT collected here -- no elektrica.renter or platform.person column
+    exists for any of them yet (out of scope for this route; would need
+    its own schema decision, not assumed into this endpoint)."""
+    first_name: str
+    last_name: str
+    actor: str
+    date_of_birth: Optional[date] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    jotform_submission_ref: Optional[str] = None
+    drive_folder_ref: Optional[str] = None
+
+
+class RenterIntakeOut(BaseModel):
+    """match_status is the literal string platform.match_or_create_person()
+    returns: 'attached' | 'queued' | 'created'. renter is None exactly
+    when match_status == 'queued' -- per docs/BACKLOG.md, a queued match
+    must NOT be treated as linked yet, so this route deliberately has no
+    elektrica.renter row to return in that case. queue_id is the
+    platform.person_match_queue row id for a human to resolve (None
+    otherwise)."""
+    match_status: str
+    person_id: int
+    queue_id: Optional[int] = None
+    renter: Optional[RenterOut] = None
 
 
 class RentalOut(BaseModel):
@@ -764,6 +839,40 @@ def create_renter(body: RenterIn, cur=Depends(get_cursor)):
         drive_folder_ref=body.drive_folder_ref,
     )
     return _renter_to_out(renter)
+
+
+@app.post("/renters/intake", response_model=RenterIntakeOut)
+def intake_renter(body: RenterIntakeIn, cur=Depends(get_privileged_cursor)):
+    """Handoff §2.2 step 1: the real JotForm-submission entry point.
+    Uses get_privileged_cursor(), NOT get_cursor() -- see that
+    dependency's own docstring: platform.match_or_create_person() is
+    callable only by neondb_owner/platform_identity_service, and
+    elektrica_app (get_cursor()'s role whenever ELEKTRICA_DB_SET_ROLE is
+    configured) has no path to either, confirmed by direct query against
+    real staging Postgres this cycle.
+
+    Does not itself normalize email/phone (lowercasing, digit-stripping,
+    etc.) before calling repo.match_or_create_and_link_renter() --
+    platform.match_or_create_person()'s own exact-match step does a
+    literal equality comparison against already-normalized
+    platform.person rows, so un-normalized input here would silently
+    under-match. No normalization utility exists yet in this codebase to
+    call instead of inventing one inline -- flagged as a real gap, not
+    silently done wrong: docs/BACKLOG.md gets an entry for this."""
+    result = repo.match_or_create_and_link_renter(
+        cur, body.first_name, body.last_name, body.actor,
+        date_of_birth=body.date_of_birth,
+        email_normalized=body.email,
+        phone_normalized=body.phone,
+        jotform_submission_ref=body.jotform_submission_ref,
+        drive_folder_ref=body.drive_folder_ref,
+    )
+    return RenterIntakeOut(
+        match_status=result.match_status,
+        person_id=result.person_id,
+        queue_id=result.queue_id,
+        renter=_renter_to_out(result.renter) if result.renter else None,
+    )
 
 
 @app.get("/renters/{renter_id}", response_model=RenterOut)
