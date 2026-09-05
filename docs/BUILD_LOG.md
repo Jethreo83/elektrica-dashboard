@@ -1021,3 +1021,53 @@ two different levels:**
   cycle so far).
 - `insurer_payment`/`adjuster` still export-blocked (no ETA).
 - Frontend not started (deliberately last per ADR-001 v2).
+
+## 2026-09-04 (continuous cron cycle, later) — Test infra fix + migration 007 grant-scope flag raised to Jed
+
+**Starting point:** pulled origin/main — up to date, clean tree, no concurrent
+uncommitted work. Ran the full test suite before touching anything, using the
+bare `pytest` invocation (not the targeted `pytest test_models.py test_api.py`
+every prior cycle's log describes) to sanity-check the whole repo state.
+
+**Bug found and fixed:** bare `pytest` failed to collect at all —
+`docs/superseded/phase1-sqlite-app/`'s archived Phase 1 test suite (kept
+intentionally for history per `docs/OVERNIGHT_DECISIONS.md`'s "URGENT" entry)
+was being picked up alongside this repo's real tests, and its own `app/`
+package collided on module name with this repo's real `app/` package
+(`ImportError: cannot import name 'ComparableSet' from 'app.models'`
+resolving to the wrong file). Every prior cycle's clean test runs were
+real but happened to always use the targeted invocation, masking this.
+Added `pytest.ini` (`norecursedirs = docs`) — bare `pytest` now correctly
+collects and passes 85/85. Committed as `d995cfe`, pushed to `origin/main`.
+
+**Reviewed migration 007 (JP litigation wiring) in detail this cycle and am
+flagging its grant scope rather than building past it**, per this bot's own
+absolute VLS-boundary rule. Migration 007 is Jed-approved (relayed by hermes,
+logged in `docs/OVERNIGHT_DECISIONS.md`) as *architecture* — cross-schema
+reuse of `vls.valid_next_states()` instead of forking VLS's JP state machine
+— and is staging-only, never promoted to production. What I flagged is
+narrower than the architecture decision itself: the migration's actual GRANT
+statements give `elektrica_app` `SELECT, INSERT` on **all of** `vls.case`
+and `vls.case_event`, with no row-level scoping visible in the migration
+limiting that access to Elektrica-linked cases only (i.e. rows where some
+Elektrica rental's `vls_case_id` points at them) versus VLS's own client
+matters sharing the same tables. I have read clearance on VLS *schema/
+migration files* to understand this wiring, but I do not have — and this
+task doesn't give me — standing to independently judge whether that grant
+scope is safe, since that's a real privilege-boundary call touching VLS
+client data, not an Elektrica-internal decision. Logged in my own memory
+(shared with Complete Collision bot) for continuity; not resolving further
+without Jed's explicit sign-off. This does not block other Elektrica build
+work — nothing else in the current build queue depends on resolving this
+first, and migration 007 stays staging-only either way until Jed decides.
+
+**Did not otherwise build new app-layer code this cycle** — reviewing/fixing
+what was here took priority given the flag above; next cycle should resume
+at the ADR-001 v2 §7 build-order queue (insurer_payment/adjuster still
+export-blocked; auth/session layer still absent; frontend still not started).
+
+**Open items unchanged:** no auth/session layer on any route; `insurer_payment`/
+`adjuster` export-blocked; frontend not started; **NEW — migration 007's
+`vls.case`/`vls.case_event` grant scope needs Jed's explicit review before
+any production promotion** (see above; not urgent since it's staging-only,
+but should not be forgotten before that promotion happens).
