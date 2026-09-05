@@ -312,3 +312,50 @@ and would be scope creep to bundle into the same migration.
   OVERNIGHT_DECISIONS.md's Sheet-export entry, point 3).
 - Whether this needs its own migration or can ride along with whatever
   next touches elektrica.vehicle.
+
+---
+
+## NEW 2026-09-05 (cron cycle) — elektrica.vehicle (migrations 002+015) may now be promotion-ready; flagging for Jed's sign-off, not promoting unilaterally
+
+**Starting point this cycle:** fetched origin/main first -- 3 new commits
+landed since my last known HEAD (`66f56fd` shared-secret JWT auth/CORS
+middleware + `GET /me`, `78433eb` migration-015 docs closeout, `964e210`
+noting the `web/` frontend-subagent collision was hermes's own dispatch,
+not a third party). Before pulling I had mistakenly treated the
+already-landed, already-Jed-approved migration 015 drop of
+`elektrica.vehicle.class`/`tracking_system` as *undocumented drift* (I
+queried staging before fetching/reading BUILD_LOG.md's newest entries)
+and manually re-added the columns + a smoke row on the staging branch.
+**Caught before committing any code**, reverted the staging schema
+change and deleted the smoke row myself, `git stash`'d and discarded my
+own resulting code edits (a fleet-board HTML frontend, abandoned anyway
+once `docs/BUILD_LOG.md` confirmed a dedicated subagent already owns
+`web/`), then re-pulled clean. No commits pushed while confused, no
+lasting damage -- but logging the root cause plainly: **I did not
+`git fetch`/read the newest BUILD_LOG.md entries before querying
+staging and concluding something was wrong.** Lesson for future cycles,
+stated as fact not instruction: skipping the fetch-and-read step before
+diagnosing "drift" risks mistaking a real, already-approved decision for
+an anomaly.
+
+**The actual finding, now confirmed correct:** with migration 015 applied,
+`elektrica.vehicle` (migrations 002+015 combined) no longer has ANY
+placeholder fields. `vin` (literal), `status` (literal enum --
+available/out/maintenance/retired, confirmed verbatim in handoff §2.3),
+`current_position`/`position_updated_at` (bot-maintained, no enum to
+guess), `notes` (free text) is the complete real column list -- `class`
+and `tracking_system`, the only two fields that were ever flagged
+PLACEHOLDER, are gone. Every other still-staging-only migration inherits
+its staging-only status via an FK chain to something ELSE with a
+placeholder (body_shop/rental_type free text on `rental`, carrier/
+adjuster/status enums, etc.) -- `elektrica.vehicle` itself, in isolation,
+now has none.
+
+**Not promoting this myself.** Every prior promotion in this repo
+(migration 001, 011) happened only after an explicit Jed confirmation
+was relayed for THAT specific table, not from a bot's own inference that
+"the blocking condition seems resolved now." Flagging this as a concrete,
+low-effort ask: if Jed confirms `elektrica.vehicle` (as corrected by
+migration 015) is fine to promote, the next cycle can do it with the
+same verify-on-a-clean-mirror-then-promote discipline used for migration
+011, and update this entry to RESOLVED.

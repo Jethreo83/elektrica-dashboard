@@ -243,9 +243,74 @@ def create_vehicle(cur, vehicle: Vehicle, actor: str) -> Vehicle:
 
 
 def list_vehicles_by_status(cur, status: VehicleStatus) -> list[Vehicle]:
-    """Backs the Fleet board's "Out" / "Available" halves (handoff §2.5)."""
+    """Backs the JSON /fleet/out /fleet/available routes (bare vehicle
+    rows only). See fleet_board_out()/fleet_board_available() below for
+    the joined shape handoff §2.5 actually specifies (body shop/rental
+    type/renter name beside each Out vehicle) -- this simpler function
+    predates that join and stays for callers that only need the vehicle
+    row itself."""
     cur.execute("SELECT * FROM elektrica.vehicle WHERE status = %s ORDER BY id", (status.value,))
     return [_vehicle_from_row(r) for r in cur.fetchall()]
+
+
+def fleet_board_out(cur) -> list[dict]:
+    """Handoff §2.5 literal spec for the "Out" half: "each vehicle with
+    body shop / rental type / renter name beside it, plus bot-reported
+    live status." Joins vehicle -> its current (non-resolved) rental ->
+    renter -> platform.person for the name. A vehicle can have multiple
+    historical rentals; only the live one (current_state <> 'resolved')
+    belongs on this board -- LEFT JOIN LATERAL picks the most recent.
+    Returns flat dicts (frontend-shape decision, not a Vehicle/Rental
+    dataclass round-trip) since this is a read-only board projection,
+    not an entity this app writes back to."""
+    cur.execute(
+        """
+        SELECT
+            v.id AS vehicle_id, v.vin,
+            v.current_position, v.position_updated_at,
+            r.id AS rental_id, r.body_shop, r.rental_type, r.current_state,
+            r.start_date, r.end_date,
+            p.first_name, p.last_name
+        FROM elektrica.vehicle v
+        LEFT JOIN LATERAL (
+            SELECT * FROM elektrica.rental
+            WHERE vehicle_id = v.id AND current_state <> 'resolved'
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) r ON true
+        LEFT JOIN elektrica.renter ren ON ren.id = r.renter_id
+        LEFT JOIN platform.person p ON p.id = ren.person_id
+        WHERE v.status = 'out'
+        ORDER BY v.id
+        """
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def fleet_board_available(cur) -> list[dict]:
+    """Handoff §2.5 literal spec for the "Available" half: "grouped by
+    class." KNOWN SPEC CONFLICT, flagged not silently resolved: migration
+    015 (2026-09-05, Jed-confirmed) dropped elektrica.vehicle.class
+    entirely because it doesn't exist as a real Fleet-sheet column --
+    but the handoff's Fleet-board spec (written before that correction)
+    still says "grouped by class." There is currently NO data this
+    function can group by; it returns a flat, ungrouped vehicle list
+    with a `class` key hardcoded to None on every row, so a frontend
+    consuming this can render a single ungrouped list today and add
+    real grouping later without a response-shape change, once Jed
+    decides what (if anything) replaces class-grouping now that the
+    column is gone (see docs/BACKLOG.md's still-open
+    Year/Make/Model/... Fleet-column entry -- Make/Model may end up
+    being the real grouping key, but that is not decided yet)."""
+    cur.execute(
+        """
+        SELECT id AS vehicle_id, vin, notes
+        FROM elektrica.vehicle
+        WHERE status = 'available'
+        ORDER BY vin
+        """
+    )
+    return [{**dict(row), "class": None} for row in cur.fetchall()]
 
 
 def update_vehicle_position(cur, vehicle_id: int, position: dict, actor: str) -> Vehicle:

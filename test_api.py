@@ -13,6 +13,17 @@ from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import patch
 
+# Same auth-bypass conftest.py sets for pytest -- pytest auto-loads
+# conftest.py, but `python test_api.py` (the manual runner this file's
+# own module docstring documents) does NOT, so the global SSO-JWT auth
+# middleware in app/api.py would otherwise 401 every request here. Set
+# it explicitly in this module too so both invocation styles work,
+# rather than only fixing the pytest path and leaving the manual runner
+# broken (real bug found running `python test_api.py` this cycle, not
+# just inspection -- it failed with a raw 401 on the very first
+# repo-mocked test before this fix).
+os.environ.setdefault("ELEKTRICA_DISABLE_AUTH", "1")
+
 import psycopg2.errors
 from fastapi.testclient import TestClient
 
@@ -177,6 +188,36 @@ def test_fleet_out():
         r = client.get("/fleet/out")
     check("test_fleet_out_status", r.status_code == 200, r.text)
     check("test_fleet_out_body", r.json()[0]["status"] == "out")
+
+
+def test_fleet_board_out_route():
+    """Handoff §2.5 literal Out-half shape -- body_shop/rental_type/renter
+    name beside the vehicle, via the new joined repo.fleet_board_out()."""
+    row = {
+        "vehicle_id": 1, "vin": "OUTVIN001", "current_position": None,
+        "position_updated_at": None, "rental_id": 5, "body_shop": "Roxie",
+        "rental_type": "Claimant", "current_state": "active",
+        "start_date": None, "end_date": None,
+        "first_name": "Jane", "last_name": "Doe",
+    }
+    with patch("app.api.repo.fleet_board_out", return_value=[row]):
+        r = client.get("/fleet-board/out")
+    check("test_fleet_board_out_status", r.status_code == 200, r.text)
+    check("test_fleet_board_out_body_shop", r.json()[0]["body_shop"] == "Roxie", r.text)
+    check("test_fleet_board_out_renter_name", r.json()[0]["first_name"] == "Jane", r.text)
+
+
+def test_fleet_board_available_route():
+    """Handoff §2.5 literal Available-half shape. Also pins the KNOWN
+    SPEC CONFLICT documented in repo.fleet_board_available()'s docstring:
+    `class` is always null since migration 015 dropped the column --
+    this is a visible regression test for that documented gap, not an
+    assertion that grouping-by-class actually works."""
+    row = {"vehicle_id": 2, "vin": "AVAILVIN002", "notes": None, "class": None}
+    with patch("app.api.repo.fleet_board_available", return_value=[row]):
+        r = client.get("/fleet-board/available")
+    check("test_fleet_board_available_status", r.status_code == 200, r.text)
+    check("test_fleet_board_available_class_is_null", r.json()[0]["class"] is None, r.text)
 
 
 def test_create_vehicle():
@@ -1272,6 +1313,7 @@ def test_get_adjuster_not_found():
 if __name__ == "__main__":
     tests = [
         test_health, test_fleet_out,
+        test_fleet_board_out_route, test_fleet_board_available_route,
         test_create_vehicle, test_create_vehicle_duplicate_vin_returns_409,
         test_create_vehicle_bad_status_returns_400,
         test_get_vehicle_by_vin_found, test_get_vehicle_by_vin_not_found,
@@ -1287,6 +1329,7 @@ if __name__ == "__main__":
         test_decide_person_match_queue_not_found_404,
         test_decide_person_match_queue_already_resolved_400,
         test_create_rental, test_create_rental_bad_billed_to,
+        test_list_rentals_no_filter, test_list_rentals_with_state_filter, test_list_rentals_bad_state_filter,
         test_get_rental_found, test_get_rental_not_found,
         test_transition_rental_success, test_transition_rental_illegal_returns_400,
         test_transition_rental_bad_state_value_returns_400,
