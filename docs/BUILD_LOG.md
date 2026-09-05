@@ -1945,3 +1945,58 @@ answers the class/tracking_system question. `insurer_payment`/`adjuster`
 historical import (handoff §2.9) remains genuinely blocked separately —
 this export didn't include payment history at all, only Fleet + Rental
 Management.
+
+## 2026-09-05 — migration 015: dropped elektrica.vehicle.class/tracking_system (Jed's answer)
+
+Jed's direct answer to the discrepancy flagged above: `class`/
+`tracking_system` don't exist as separate columns anywhere in the real
+Fleet data (not just "not on Fleet info" -- covers the per-vehicle tabs
+too). Drop them from `elektrica.vehicle`; derive/infer that info
+differently elsewhere if the app layer ever needs it, rather than
+storing a column sourced from a Sheet field that doesn't exist.
+
+- **migrations/015_elektrica_vehicle_drop_class_tracking.sql**: drops
+  `elektrica.vehicle.class`, `elektrica.vehicle.tracking_system`, and the
+  now-unused `elektrica.tracking_system` enum type. `elektrica.vehicle_class`
+  the TYPE stays -- still used by `elektrica.comparable_set.vehicle_class`
+  (a market-rate classification, never FK'd to `vehicle.class`). New
+  migration rather than editing migration 002 in place, matching this
+  repo's established "fix gets its own numbered migration" convention
+  (same as migration 012). No data preserved/migrated: confirmed against
+  the production branch directly first that `elektrica.vehicle` was
+  never promoted, so every row anywhere is test/smoke data.
+- Verified 5/5 checks on staging: columns gone, `tracking_system` type
+  gone, `vehicle_class` type intact, `elektrica.vehicle` still inserts
+  fine on remaining columns, `elektrica.comparable_set.vehicle_class`
+  still works end-to-end.
+- Updated the app layer to match: `app/models.py` (dropped
+  `TrackingSystem` enum and `Vehicle.vehicle_class`/`.tracking_system`
+  fields; kept `VehicleClass` for `ComparableSet`), `app/repository.py`
+  (`create_vehicle`/`_vehicle_from_row`), `app/api.py`
+  (`VehicleIn`/`VehicleOut` schemas, `create_vehicle` handler,
+  `_vehicle_to_out`), `test_api.py` (removed the two now-meaningless
+  bad-enum-value tests, fixed the two that still apply), and
+  `scripts/_smoke_repository.py`. All 149 pytest tests pass.
+- **Collision note:** while working this, discovered the local working
+  tree had moved from commit `6ff394d` to `66f56fd` without me running
+  `git pull` myself -- a concurrent process/session committed a real
+  shared-secret JWT auth middleware feature (`GET /me`, SSO verification
+  against `elektrica.staff_user`) directly on top of my *uncommitted*
+  in-progress migration-015 edits sitting in the shared working
+  directory, and pushed the combined result. Verified carefully before
+  trusting any of it: diffed my originally-written migration 015 /
+  verify_015.sql against what's in that commit (byte-identical), diffed
+  `app/repository.py`'s vehicle-column removal (present, correct), and
+  ran the full pytest suite against both the pre- and post-collision
+  state to confirm nothing regressed. No data loss, no incorrect merge
+  -- just an unusual instance of two sessions' edits landing in the same
+  commit because they were both live in the same working directory at
+  once. Flagging this pattern (not just origin-vs-local collisions, but
+  same-working-directory-uncommitted-edit collisions) as worth raising
+  with hermes/Jed if it recurs.
+- Added `docs/BACKLOG.md` entry for the real Fleet columns
+  (Year/Make/Model/Nickname/Plate/Miles/Toll Tag/Owner/Lender/Ownership
+  Type) that `elektrica.vehicle` still doesn't have at all -- explicitly
+  NOT bundled into migration 015 since Jed's instruction was to drop
+  class/tracking_system, not add the rest; that's new scope needing its
+  own sign-off (Owner/Lender person_id-vs-free-text question especially).

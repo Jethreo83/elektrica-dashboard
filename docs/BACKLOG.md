@@ -281,3 +281,34 @@ a real staff member through this route today requires the same
 privileged, non-`elektrica_app` connection every other admin-only
 function in this repo needs, and that gate is a human-operated deploy
 decision, not something this cycle resolves.
+
+## elektrica.vehicle is missing real Fleet-sheet columns
+
+**Not urgent, needs Jed's scoping decision before building.** The real
+`data/real_exports/elektrica_fleet_export.json` "Fleet info" tab has
+these columns confirmed real (2026-09-05): Year, Make, Model, Nickname,
+VIN, Plate, Miles, Toll Tag, Owner, Lender, Ownership Type.
+`elektrica.vehicle` (migration 002, corrected by migration 015) only has
+vin/status/current_position/notes -- none of Year/Make/Model/Nickname/
+Plate/Miles/Toll Tag/Owner/Lender/Ownership Type exist as columns yet.
+
+This was flagged separately from the class/tracking_system correction
+(migration 015) because Jed's instruction was specifically to drop
+class/tracking_system -- adding the other real columns wasn't asked for
+and would be scope creep to bundle into the same migration.
+
+**Open questions before building, not guessed at:**
+- Owner/Lender likely need to be `platform.person_id` FKs (per convention
+  #1: every party gets a person_id, not a free-text name column) rather
+  than plain TEXT -- but Owner/Lender aren't necessarily platform.person
+  in the renter/staff/client sense; could be Elektrica Holdings LLC
+  itself, or another business entity, or an individual. Needs Jed's read
+  on whether Owner/Lender should be a person_id, a free-text field, or a
+  new small `elektrica.entity`/`owner` lookup table.
+- Ownership Type is presumably an enum (owned/leased/financed?) but only
+  the "Fleet info" tab's header row was captured, not its full value
+  set -- same "don't invent enum values from insufficient sample" rule
+  as the Rental Management Settings tab enums (see
+  OVERNIGHT_DECISIONS.md's Sheet-export entry, point 3).
+- Whether this needs its own migration or can ride along with whatever
+  next touches elektrica.vehicle.

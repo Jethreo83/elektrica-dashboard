@@ -267,11 +267,35 @@ are safe, string-length/type-class descriptions used for data VALUES):**
    first real data row). Trusting the declared `headers` field at face
    value would silently produce garbage.
 
-**Open question for Jed, not resolved unilaterally:** does
-`vehicle.class`/`tracking_system` live on a per-vehicle tab instead of
-`Fleet info`, or was the 2026-09-03 "confirmed" answer based on a
-different source than what this export captured? No schema change made
-either direction pending his answer.
+**Open question for Jed — RESOLVED 2026-09-05:** Jed's direct answer:
+`class`/`tracking_system` don't exist as separate columns in the real
+data (full stop, not just "not on the Fleet info tab" — his answer
+covers the per-vehicle tabs too, so the "maybe they're on one of the 53
+unparsed tabs" caveat above is now moot). Drop them from
+`elektrica.vehicle`'s schema as designed; derive/infer that info
+differently if the app layer ever needs it (e.g. computed from
+make/model, or a separate lookup), rather than storing it as a column
+sourced from a Sheet field that doesn't exist.
+
+**Action taken:** migration 015 (`015_elektrica_vehicle_drop_class_tracking.sql`)
+drops `elektrica.vehicle.class`, `elektrica.vehicle.tracking_system`, and
+the now-unused `elektrica.tracking_system` enum type. `elektrica.vehicle_class`
+the TYPE stays — it's still used by `elektrica.comparable_set.vehicle_class`,
+a market-rate classification independent of any per-vehicle Fleet record
+(handoff §2.8), never FK'd to `vehicle.class` in the first place. No data
+migration/backfill needed: `elektrica.vehicle` was never promoted to
+production (confirmed directly against the production branch before
+writing the migration), so every existing row anywhere is test/smoke
+data. Verified 5/5 checks on staging (columns gone, tracking_system type
+gone, vehicle_class type intact, vehicle table still usable, comparable_set
+still usable). Updated `app/models.py`, `app/repository.py`, `app/api.py`,
+`test_api.py`, and `scripts/_smoke_repository.py` to match; all 149
+pytest tests pass. **Not acted on** (separate, smaller question, not
+part of what Jed decided here): the real Fleet info tab also has
+Year/Make/Model/Nickname/Plate/Miles/Toll Tag/Owner/Lender/Ownership Type
+columns that `elektrica.vehicle` doesn't have at all yet — adding those
+would be new scope, not the correction Jed asked for. Logged separately
+in `docs/BACKLOG.md` rather than bundled into migration 015.
 
 ---
 

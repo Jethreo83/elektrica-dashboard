@@ -27,7 +27,7 @@ from app.db import cursor
 from app.models import (
     Demand, DemandRecipientType, DemandType, EventSource, Payment,
     PaymentSource, ProposalKind, ProposalStatus, Rental, RentalProposal,
-    RentalState, Toll, Vehicle, VehicleClass, VehicleStatus,
+    RentalState, Toll, Vehicle, VehicleStatus,
 )
 from app import repository as repo
 
@@ -54,8 +54,7 @@ def main():
 
         print("--- create vehicle ---")
         vehicle = repo.create_vehicle(
-            cur, Vehicle(vin="SMOKETESTVIN00042", vehicle_class=VehicleClass.SEDAN,
-                         status=VehicleStatus.AVAILABLE),
+            cur, Vehicle(vin="SMOKETESTVIN00042", status=VehicleStatus.AVAILABLE),
             "smoke_test",
         )
         ids["vehicle_id"] = vehicle.id
