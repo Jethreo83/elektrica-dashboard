@@ -1071,3 +1071,95 @@ export-blocked; auth/session layer still absent; frontend still not started).
 `vls.case`/`vls.case_event` grant scope needs Jed's explicit review before
 any production promotion** (see above; not urgent since it's staging-only,
 but should not be forgotten before that promotion happens).
+
+## 2026-09-04 (continuous cron cycle, later still) — Uncommitted work finished + Vehicle/Renter HTTP routes closed
+
+**Starting point:** found a dirty working tree at cycle start (uncommitted
+edits to `app/api.py` / `test_api.py`) from a prior unattended cron cycle
+that ran out before it could commit. Diffed it carefully before touching
+anything: it was the OPEN ITEM this same file's own module docstring had
+flagged two cycles ago -- a real, complete, correctly-scoped fix (scoped
+`X-Api-Key` auth on `POST /rentals/{id}/proposals` per handoff §1.7, fail-
+closed via `require_bot_api_key()`, `hmac.compare_digest`). Ran the full
+suite first (88/88 passed) to confirm correctness, then committed it
+(`75073e5`) and pushed rather than discarding real finished work.
+
+**Built this cycle: Vehicle + Renter HTTP routes** -- the same shape of gap
+as the staff-provisioning route closure two cycles ago: `app/repository.py`
+already had `create_vehicle`, `get_vehicle`, `get_vehicle_by_vin`,
+`update_vehicle_position`, `create_renter_for_existing_person`,
+`get_renter`, `get_renter_by_person_id` with zero HTTP surface. Added:
+
+- `POST /vehicles` (VIN uniqueness check -> 409, bad enum values -> 400),
+  `GET /vehicles/vin/{vin}`, `GET /vehicles/{vehicle_id}`,
+  `POST /vehicles/{vehicle_id}/position` (bot-maintained non-legal field,
+  handoff §2.3 -- the future rental-ops bot's future write target, nothing
+  calls it automatically today).
+- `POST /renters` (match-before-create discipline preserved -- takes an
+  already-resolved `person_id`, does NOT do its own identity matching, per
+  `docs/BACKLOG.md`), `GET /renters/{renter_id}`,
+  `GET /renters/by-person/{person_id}`.
+- Unlike the staff-provisioning routes, `elektrica_app` has full
+  SELECT/INSERT/UPDATE on `elektrica.vehicle`/`elektrica.renter`
+  (migration 001/002) -- no privilege-gap 403 case needed here.
+- 20 new `test_api.py` cases (104/104 total under pytest).
+
+**Real bug found and fixed via the direct `python test_api.py` run (not
+pytest):** first draft registered `GET /vehicles/revenue-summary` AFTER
+`GET /vehicles/{vehicle_id}` -- the same class of route-ordering hazard
+`/rentals/blocked` already had a comment warning about, but I didn't apply
+the lesson to my own new code the first time. `int`-typed `{vehicle_id}`
+still swallowed the literal `revenue-summary` segment; pytest's per-route
+mocked calls didn't catch it (they patch the repo function directly and
+never exercise real FastAPI routing), but the direct script run's real
+`TestClient` HTTP calls did (`test_vehicle_revenue_summary` failed).
+Reordered the route registration; both suites now pass (104/104 pytest,
+77/77 direct run).
+
+**Live-verified against real staging Postgres, real HTTP (uvicorn on
+`127.0.0.1:8247`, `neondb_owner` staging connection):** create vehicle
+(id=9, VIN `SMOKE-VIN-0904-cron`) -> duplicate-VIN 409 -> lookup by VIN and
+by id -> `revenue-summary` returns 200 (proves the route-ordering fix
+against real routing, not just the mock) -> position update -> position
+on a nonexistent vehicle id returns 404 not 500. Then renter: linked
+`platform.person` id=15 (existing staging row, previously unused) as a new
+renter (id=9) -> lookup by id and by person_id -> lookup on an unlinked
+person_id returns 404 -> re-POSTing the same person_id returns the
+existing renter row (idempotent, per `create_renter_for_existing_person`'s
+own docstring) rather than erroring or duplicating. Server killed after;
+confirmed via `netstat` that the process actually exited (no LISTENING
+socket left).
+
+**Also found and cleaned up, not part of my own work:** a genuinely
+orphaned `uvicorn` process was still `LISTENING` on `127.0.0.1:8231` from
+an earlier, unrelated cron cycle that never shut it down (its `/health`
+returned this repo's real `{"status": "ok"}`, confirming it was this
+app, not something else). Killed it (`taskkill /F`) -- leaving a stray
+locally-bound server running between unattended cycles is exactly the
+kind of silent residue this build's own standing discipline says not to
+leave behind.
+
+**git note:** `patch` flagged a "modified by sibling subagent, never read"
+warning on `test_api.py` mid-edit this cycle. Investigated before
+proceeding: `git diff --stat` after the write showed only my own intended
+changes (import list + one 6-line diff), no foreign content -- treating
+this as a stale/false-positive tracker artifact from the earlier
+uncommitted-work situation at the top of this entry, not an actual
+concurrent write collision. Flagging here for the record in case a real
+one shows up in a future cycle and this pattern needs to be taken more
+seriously.
+
+**Committed & pushed** to `origin/main` (two commits: `75073e5` for the
+API-key fix, one more for the vehicle/renter routes).
+
+**Not done / explicitly deferred:** no auth/session layer on any route
+(unchanged, standing); `insurer_payment`/`adjuster` still export-blocked,
+no ETA (unchanged); frontend not started (unchanged, deliberately last per
+ADR-001 v2); migration 007's `vls.case` grant-scope flag for Jed still
+open (unchanged, staging-only so not urgent).
+
+**Next up:** same as before -- `insurer_payment`/`adjuster` remain export-
+blocked; frontend not started; consider whether a Fleet-board "list all
+vehicles" or "list all renters" route is worth adding next (handoff §2.5
+only explicitly needs Out/Available, which already existed) before moving
+to something else in the build-order queue.

@@ -22,9 +22,9 @@ from app.models import (
     CommunicationMatchStatus, Demand, DemandRecipientType, DemandType,
     Document, DocumentTemplate, DocumentTemplateFamily, OutboundChannel,
     OutboundLog, Payment, PaymentSource, ProposalKind, ProposalStatus,
-    Rental, RentalBilledTo, RentalEvent, RentalProposal, RentalState,
-    EventSource, StaffRole, StaffUser, Toll, Vehicle, VehicleClass,
-    VehicleStatus,
+    Renter, Rental, RentalBilledTo, RentalEvent, RentalProposal, RentalState,
+    EventSource, StaffRole, StaffUser, Toll, TrackingSystem, Vehicle,
+    VehicleClass, VehicleStatus,
 )
 
 FAILED = []
@@ -137,6 +137,12 @@ def _sample_communication(**overrides) -> Communication:
     return Communication(**defaults)
 
 
+def _sample_renter(**overrides) -> Renter:
+    defaults = dict(id=1, person_id=11)
+    defaults.update(overrides)
+    return Renter(**defaults)
+
+
 def test_health():
     r = client.get("/health")
     check("test_health", r.status_code == 200 and r.json() == {"status": "ok"})
@@ -147,6 +153,108 @@ def test_fleet_out():
         r = client.get("/fleet/out")
     check("test_fleet_out_status", r.status_code == 200, r.text)
     check("test_fleet_out_body", r.json()[0]["status"] == "out")
+
+
+def test_create_vehicle():
+    with patch("app.api.repo.get_vehicle_by_vin", return_value=None), \
+         patch("app.api.repo.create_vehicle", return_value=_sample_vehicle(status=VehicleStatus.AVAILABLE)):
+        r = client.post(
+            "/vehicles",
+            json={"vin": "1FADP3F20EL123456", "actor": "jed", "vehicle_class": "sedan", "status": "available"},
+        )
+    check("test_create_vehicle_status", r.status_code == 200, r.text)
+    check("test_create_vehicle_body", r.json()["vin"] == "1FADP3F20EL123456")
+
+
+def test_create_vehicle_duplicate_vin_returns_409():
+    with patch("app.api.repo.get_vehicle_by_vin", return_value=_sample_vehicle()):
+        r = client.post("/vehicles", json={"vin": "1FADP3F20EL123456", "actor": "jed"})
+    check("test_create_vehicle_duplicate_vin_returns_409", r.status_code == 409, r.text)
+
+
+def test_create_vehicle_bad_status_returns_400():
+    r = client.post("/vehicles", json={"vin": "SOMEVIN", "actor": "jed", "status": "not_a_status"})
+    check("test_create_vehicle_bad_status_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_vehicle_bad_class_returns_400():
+    with patch("app.api.repo.get_vehicle_by_vin", return_value=None):
+        r = client.post("/vehicles", json={"vin": "SOMEVIN", "actor": "jed", "vehicle_class": "not_a_class"})
+    check("test_create_vehicle_bad_class_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_vehicle_bad_tracking_system_returns_400():
+    with patch("app.api.repo.get_vehicle_by_vin", return_value=None):
+        r = client.post("/vehicles", json={"vin": "SOMEVIN", "actor": "jed", "tracking_system": "not_real"})
+    check("test_create_vehicle_bad_tracking_system_returns_400", r.status_code == 400, r.text)
+
+
+def test_get_vehicle_by_vin_found():
+    with patch("app.api.repo.get_vehicle_by_vin", return_value=_sample_vehicle()):
+        r = client.get("/vehicles/vin/1FADP3F20EL123456")
+    check("test_get_vehicle_by_vin_found", r.status_code == 200, r.text)
+
+
+def test_get_vehicle_by_vin_not_found():
+    with patch("app.api.repo.get_vehicle_by_vin", return_value=None):
+        r = client.get("/vehicles/vin/NOSUCHVIN")
+    check("test_get_vehicle_by_vin_not_found", r.status_code == 404)
+
+
+def test_get_vehicle_found():
+    with patch("app.api.repo.get_vehicle", return_value=_sample_vehicle()):
+        r = client.get("/vehicles/1")
+    check("test_get_vehicle_found", r.status_code == 200, r.text)
+
+
+def test_get_vehicle_not_found():
+    with patch("app.api.repo.get_vehicle", return_value=None):
+        r = client.get("/vehicles/999")
+    check("test_get_vehicle_not_found", r.status_code == 404)
+
+
+def test_update_vehicle_position():
+    with patch("app.api.repo.update_vehicle_position", return_value=_sample_vehicle(current_position={"lat": 30.27, "lon": -97.74})):
+        r = client.post("/vehicles/1/position", json={"position": {"lat": 30.27, "lon": -97.74}, "actor": "bouncie_bot"})
+    check("test_update_vehicle_position_status", r.status_code == 200, r.text)
+    check("test_update_vehicle_position_body", r.json()["current_position"] == {"lat": 30.27, "lon": -97.74})
+
+
+def test_update_vehicle_position_not_found_returns_404():
+    with patch("app.api.repo.update_vehicle_position", side_effect=ValueError("No vehicle with id=999")):
+        r = client.post("/vehicles/999/position", json={"position": {}, "actor": "bouncie_bot"})
+    check("test_update_vehicle_position_not_found_returns_404", r.status_code == 404, r.text)
+
+
+def test_create_renter():
+    with patch("app.api.repo.create_renter_for_existing_person", return_value=_sample_renter()):
+        r = client.post("/renters", json={"person_id": 11, "actor": "jed"})
+    check("test_create_renter_status", r.status_code == 200, r.text)
+    check("test_create_renter_body", r.json()["person_id"] == 11)
+
+
+def test_get_renter_found():
+    with patch("app.api.repo.get_renter", return_value=_sample_renter()):
+        r = client.get("/renters/1")
+    check("test_get_renter_found", r.status_code == 200, r.text)
+
+
+def test_get_renter_not_found():
+    with patch("app.api.repo.get_renter", return_value=None):
+        r = client.get("/renters/999")
+    check("test_get_renter_not_found", r.status_code == 404)
+
+
+def test_get_renter_by_person_found():
+    with patch("app.api.repo.get_renter_by_person_id", return_value=_sample_renter()):
+        r = client.get("/renters/by-person/11")
+    check("test_get_renter_by_person_found", r.status_code == 200, r.text)
+
+
+def test_get_renter_by_person_not_found():
+    with patch("app.api.repo.get_renter_by_person_id", return_value=None):
+        r = client.get("/renters/by-person/999")
+    check("test_get_renter_by_person_not_found", r.status_code == 404)
 
 
 def test_create_rental():
@@ -656,7 +764,16 @@ def test_reject_communication():
 
 if __name__ == "__main__":
     tests = [
-        test_health, test_fleet_out, test_create_rental, test_create_rental_bad_billed_to,
+        test_health, test_fleet_out,
+        test_create_vehicle, test_create_vehicle_duplicate_vin_returns_409,
+        test_create_vehicle_bad_status_returns_400, test_create_vehicle_bad_class_returns_400,
+        test_create_vehicle_bad_tracking_system_returns_400,
+        test_get_vehicle_by_vin_found, test_get_vehicle_by_vin_not_found,
+        test_get_vehicle_found, test_get_vehicle_not_found,
+        test_update_vehicle_position, test_update_vehicle_position_not_found_returns_404,
+        test_create_renter, test_get_renter_found, test_get_renter_not_found,
+        test_get_renter_by_person_found, test_get_renter_by_person_not_found,
+        test_create_rental, test_create_rental_bad_billed_to,
         test_get_rental_found, test_get_rental_not_found,
         test_transition_rental_success, test_transition_rental_illegal_returns_400,
         test_transition_rental_bad_state_value_returns_400,

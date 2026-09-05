@@ -71,6 +71,7 @@ from app.models import (
     PaymentSource,
     ProposalKind,
     ProposalStatus,
+    Renter,
     Rental,
     RentalBilledTo,
     RentalProposal,
@@ -80,6 +81,7 @@ from app.models import (
     Vehicle,
     VehicleClass,
     VehicleStatus,
+    TrackingSystem,
 )
 
 app = FastAPI(
@@ -164,6 +166,44 @@ class VehicleOut(BaseModel):
     status: str
     tracking_system: Optional[str] = None
     current_position: Optional[dict] = None
+
+
+class VehicleIn(BaseModel):
+    """Handoff §2.3 vehicle intake shape. class/status/tracking_system
+    values are the PLACEHOLDER enum sets from migrations/002 (see
+    app/models.py's VehicleClass docstring) -- pending real Fleet export."""
+    vin: str
+    actor: str
+    vehicle_class: Optional[str] = None
+    status: str = "available"
+    tracking_system: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class VehiclePositionIn(BaseModel):
+    """Bot-maintained, non-legal per handoff §2.3 -- a plain column
+    write with no event log of its own, distinct from rental state
+    transitions."""
+    position: dict
+    actor: str
+
+
+class RenterOut(BaseModel):
+    id: int
+    person_id: int
+    jotform_submission_ref: Optional[str] = None
+    drive_folder_ref: Optional[str] = None
+
+
+class RenterIn(BaseModel):
+    """Links an ALREADY-EXISTING platform.person as an Elektrica renter --
+    see docs/BACKLOG.md's match-before-create discipline. Identity
+    resolution (platform.match_or_create_person(), via
+    platform_identity_service) happens upstream of this call, not here."""
+    person_id: int
+    actor: str
+    jotform_submission_ref: Optional[str] = None
+    drive_folder_ref: Optional[str] = None
 
 
 class RentalOut(BaseModel):
@@ -429,6 +469,14 @@ def _vehicle_to_out(v: Vehicle) -> VehicleOut:
     )
 
 
+def _renter_to_out(r: Renter) -> RenterOut:
+    return RenterOut(
+        id=r.id, person_id=r.person_id,
+        jotform_submission_ref=r.jotform_submission_ref,
+        drive_folder_ref=r.drive_folder_ref,
+    )
+
+
 def _rental_to_out(r: Rental) -> RentalOut:
     return RentalOut(
         id=r.id, vehicle_id=r.vehicle_id, renter_id=r.renter_id,
@@ -496,6 +544,124 @@ def fleet_out(cur=Depends(get_cursor)):
 @app.get("/fleet/available", response_model=list[VehicleOut])
 def fleet_available(cur=Depends(get_cursor)):
     return [_vehicle_to_out(v) for v in repo.list_vehicles_by_status(cur, VehicleStatus.AVAILABLE)]
+
+
+# --- Vehicles (handoff §2.3 vehicle intake; elektrica_app has full
+# SELECT/INSERT/UPDATE on elektrica.vehicle per migration 002, unlike the
+# SELECT-only staff_user gap above -- so these routes are not blocked by
+# any DB privilege split.) --------------------------------------------------
+
+@app.post("/vehicles", response_model=VehicleOut)
+def create_vehicle(body: VehicleIn, cur=Depends(get_cursor)):
+    try:
+        status = VehicleStatus(body.status)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status={body.status!r} must be one of {[s.value for s in VehicleStatus]}",
+        )
+    vehicle_class = None
+    if body.vehicle_class is not None:
+        try:
+            vehicle_class = VehicleClass(body.vehicle_class)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"vehicle_class={body.vehicle_class!r} must be one of {[c.value for c in VehicleClass]}",
+            )
+    tracking_system = None
+    if body.tracking_system is not None:
+        try:
+            tracking_system = TrackingSystem(body.tracking_system)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"tracking_system={body.tracking_system!r} must be one of {[t.value for t in TrackingSystem]}",
+            )
+    existing = repo.get_vehicle_by_vin(cur, body.vin)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail=f"vin={body.vin!r} already exists as vehicle id={existing.id}")
+    vehicle = Vehicle(
+        vin=body.vin, vehicle_class=vehicle_class, status=status,
+        tracking_system=tracking_system, notes=body.notes,
+    )
+    return _vehicle_to_out(repo.create_vehicle(cur, vehicle, body.actor))
+
+
+@app.get("/vehicles/vin/{vin}", response_model=VehicleOut)
+def get_vehicle_by_vin(vin: str, cur=Depends(get_cursor)):
+    """Registered before /vehicles/{vehicle_id} would collide -- 'vin' is
+    a fixed literal segment, not a numeric path param, so there is no
+    actual FastAPI route-ordering hazard here (unlike /rentals/blocked
+    above), but the lookup semantics differ (VIN string vs. surrogate id)
+    so this stays a separate route rather than overloading one."""
+    vehicle = repo.get_vehicle_by_vin(cur, vin)
+    if vehicle is None:
+        raise HTTPException(status_code=404, detail=f"No vehicle with vin={vin!r}")
+    return _vehicle_to_out(vehicle)
+
+
+@app.get("/vehicles/revenue-summary")
+def get_vehicle_revenue_summary(cur=Depends(get_cursor)):
+    """Original bot plan's 'basic revenue/utilization view'. Registered
+    BEFORE /vehicles/{vehicle_id} below -- same route-ordering discipline
+    as /rentals/blocked above: 'revenue-summary' is a fixed literal
+    segment that would otherwise be swallowed by the int-typed
+    {vehicle_id} path param (a real bug caught via test_api.py's direct
+    __main__ run, which exercises actual FastAPI routing, unlike the
+    pytest suite's per-route mocked calls)."""
+    return repo.vehicle_revenue_summary(cur)
+
+
+@app.get("/vehicles/{vehicle_id}", response_model=VehicleOut)
+def get_vehicle(vehicle_id: int, cur=Depends(get_cursor)):
+    vehicle = repo.get_vehicle(cur, vehicle_id)
+    if vehicle is None:
+        raise HTTPException(status_code=404, detail=f"No vehicle with id={vehicle_id}")
+    return _vehicle_to_out(vehicle)
+
+
+@app.post("/vehicles/{vehicle_id}/position", response_model=VehicleOut)
+def update_vehicle_position(vehicle_id: int, body: VehiclePositionIn, cur=Depends(get_cursor)):
+    """Bot-maintained, non-legal per handoff §2.3 -- see
+    repository.update_vehicle_position()'s own docstring. This is the
+    route the future rental-operations bot (Bouncie/standard-fleet/
+    geofence, handoff §1.7/E-3) will call once it exists; nothing in
+    this repo calls it automatically today."""
+    try:
+        return _vehicle_to_out(repo.update_vehicle_position(cur, vehicle_id, body.position, body.actor))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Renters (links an already-existing platform.person; handoff §2.2 --
+# identity resolution happens upstream via platform.match_or_create_person(),
+# per docs/BACKLOG.md, NOT in this route.) -----------------------------------
+
+@app.post("/renters", response_model=RenterOut)
+def create_renter(body: RenterIn, cur=Depends(get_cursor)):
+    renter = repo.create_renter_for_existing_person(
+        cur, body.person_id, body.actor,
+        jotform_submission_ref=body.jotform_submission_ref,
+        drive_folder_ref=body.drive_folder_ref,
+    )
+    return _renter_to_out(renter)
+
+
+@app.get("/renters/{renter_id}", response_model=RenterOut)
+def get_renter(renter_id: int, cur=Depends(get_cursor)):
+    renter = repo.get_renter(cur, renter_id)
+    if renter is None:
+        raise HTTPException(status_code=404, detail=f"No renter with id={renter_id}")
+    return _renter_to_out(renter)
+
+
+@app.get("/renters/by-person/{person_id}", response_model=RenterOut)
+def get_renter_by_person(person_id: int, cur=Depends(get_cursor)):
+    renter = repo.get_renter_by_person_id(cur, person_id)
+    if renter is None:
+        raise HTTPException(status_code=404, detail=f"No renter linked to person_id={person_id}")
+    return _renter_to_out(renter)
 
 
 # --- Rentals -----------------------------------------------------------------
@@ -700,12 +866,6 @@ def get_payments(rental_id: int, cur=Depends(get_cursor)):
     if repo.get_rental(cur, rental_id) is None:
         raise HTTPException(status_code=404, detail=f"No rental with id={rental_id}")
     return [_payment_to_out(p) for p in repo.list_payments_for_rental(cur, rental_id)]
-
-
-@app.get("/vehicles/revenue-summary")
-def get_vehicle_revenue_summary(cur=Depends(get_cursor)):
-    """Original bot plan's 'basic revenue/utilization view'."""
-    return repo.vehicle_revenue_summary(cur)
 
 
 # --- Compliance --------------------------------------------------------------
