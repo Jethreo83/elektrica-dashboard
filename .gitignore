@@ -6,6 +6,11 @@ node_modules/
 dist/
 data/snapshots/
 
+# Real customer/renter PII from Google Sheets exports - never commit.
+# Kay's Rental/Fleet Management exports contain real names, emails,
+# rental costs. Local-only reference data for schema mapping.
+data/real_exports/
+
 # Superseded Phase 1 Python app, archived at docs/superseded/phase1-sqlite-app/
 __pycache__/
 *.pyc
