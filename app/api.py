@@ -55,6 +55,7 @@ from pydantic import BaseModel
 from app import db
 from app import repository as repo
 from app.models import (
+    ComparableSet,
     ComplianceItem,
     ComplianceItemStatus,
     ComplianceItemType,
@@ -298,6 +299,41 @@ class DemandOut(BaseModel):
 class MarkSentRequest(BaseModel):
     sent_via: str
     actor: str
+
+
+class LinkVlsCaseRequest(BaseModel):
+    """Handoff §2.6/migrations/007: sets elektrica.rental.vls_case_id,
+    required before a needs_served -> in_litigation transition. This
+    route does NOT create the vls.case row -- that stays VLS's own
+    write path; Elektrica only records the linkage once VLS (or a human
+    with VLS access) has created the case and handed back its id."""
+    vls_case_id: int
+    actor: str
+
+
+class ComparableSetIn(BaseModel):
+    """Handoff §2.8 literal spec -- frozen per demand at creation, no
+    update path (elektrica.comparable_set is immutable by DB trigger,
+    migrations/006)."""
+    scan_source: str
+    scan_timestamp: datetime
+    date_range_start: date
+    date_range_end: date
+    comparables: list
+    computed_average: Decimal
+    actor: str
+    vehicle_class: Optional[str] = None
+
+
+class ComparableSetOut(BaseModel):
+    id: int
+    demand_id: int
+    scan_source: str
+    vehicle_class: Optional[str] = None
+    date_range_start: date
+    date_range_end: date
+    comparables: list
+    computed_average: Decimal
 
 
 class TollIn(BaseModel):
@@ -557,6 +593,15 @@ def _demand_to_out(d: Demand) -> DemandOut:
     )
 
 
+def _comparable_set_to_out(cs: ComparableSet) -> ComparableSetOut:
+    return ComparableSetOut(
+        id=cs.id, demand_id=cs.demand_id, scan_source=cs.scan_source,
+        vehicle_class=cs.vehicle_class.value if cs.vehicle_class else None,
+        date_range_start=cs.date_range_start, date_range_end=cs.date_range_end,
+        comparables=cs.comparables, computed_average=cs.computed_average,
+    )
+
+
 def _toll_to_out(t: Toll) -> TollOut:
     return TollOut(
         id=t.id, rental_id=t.rental_id, tolloptics_record_id=t.tolloptics_record_id,
@@ -805,6 +850,33 @@ def transition_rental(rental_id: int, body: TransitionRequest, cur=Depends(get_c
     return _rental_to_out(rental)
 
 
+@app.post("/rentals/{rental_id}/vls-case", response_model=RentalOut)
+def link_vls_case(rental_id: int, body: LinkVlsCaseRequest, cur=Depends(get_cursor)):
+    """Handoff §2.6/migrations/007: records the vls.case linkage on a
+    rental. This is a plain column write, separate on purpose from
+    transition_rental -- linking a case and actually entering
+    in_litigation are two different real-world events (the DB trigger
+    still requires this to have happened before a needs_served ->
+    in_litigation transition will succeed). Does NOT create the
+    vls.case row itself -- that stays VLS's own write path."""
+    if repo.get_rental(cur, rental_id) is None:
+        raise HTTPException(status_code=404, detail=f"No rental with id={rental_id}")
+    try:
+        rental = repo.link_vls_case(cur, rental_id, body.vls_case_id, body.actor)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except psycopg2.errors.ForeignKeyViolation:
+        # rental.vls_case_id_fkey -- caller passed a vls_case_id that
+        # doesn't exist in vls.case. Client-input error, not a server
+        # fault, so 400 not a bare 500 (same discipline as the
+        # document-templates duplicate-version 500->409 fix). No manual
+        # rollback here -- get_cursor()'s db.cursor() context manager
+        # rolls back on any exception propagating out of the route,
+        # same as the UniqueViolation->409 handler above.
+        raise HTTPException(status_code=400, detail=f"No vls.case with id={body.vls_case_id}")
+    return _rental_to_out(rental)
+
+
 # --- Rental proposals (bot interface, handoff §1.7) -------------------------
 
 @app.post("/rentals/{rental_id}/proposals", response_model=ProposalOut, dependencies=[Depends(require_bot_api_key)])
@@ -878,6 +950,42 @@ def mark_demand_sent(demand_id: int, body: MarkSentRequest, cur=Depends(get_curs
 def get_aging_demands(cur=Depends(get_cursor)):
     """Handoff §2.4: a demand at 45 days with no offer -- silence is the signal."""
     return repo.list_aging_demands(cur)
+
+
+@app.post("/demands/{demand_id}/comparable-sets", response_model=ComparableSetOut)
+def create_comparable_set(demand_id: int, body: ComparableSetIn, cur=Depends(get_cursor)):
+    """Handoff §2.8: market-comparable snapshot frozen at demand-generation
+    time (elektrica.comparable_set, migrations/006, immutable-from-creation
+    by DB trigger -- no update/delete route exists or ever will for this
+    table). Requires the demand to already exist; does not validate demand
+    status (a comparable_set can in principle be regenerated for a
+    resend/prior_demand_id chain, per Demand's own prior_demand_id field --
+    the DB layer's FK is the only real constraint here)."""
+    if repo.get_demand(cur, demand_id) is None:
+        raise HTTPException(status_code=404, detail=f"No demand with id={demand_id}")
+    vehicle_class = None
+    if body.vehicle_class is not None:
+        try:
+            vehicle_class = VehicleClass(body.vehicle_class)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"vehicle_class={body.vehicle_class!r} must be one of {[c.value for c in VehicleClass]}",
+            )
+    try:
+        cs = ComparableSet(
+            demand_id=demand_id, scan_source=body.scan_source,
+            scan_timestamp=body.scan_timestamp, vehicle_class=vehicle_class,
+            date_range_start=body.date_range_start, date_range_end=body.date_range_end,
+            comparables=body.comparables, computed_average=body.computed_average,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        created = repo.create_comparable_set(cur, cs, body.actor)
+    except psycopg2.errors.ForeignKeyViolation:
+        raise HTTPException(status_code=404, detail=f"No demand with id={demand_id}")
+    return _comparable_set_to_out(created)
 
 
 # --- Tolls -------------------------------------------------------------------

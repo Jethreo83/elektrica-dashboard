@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from app.api import app, get_cursor
 from app.models import (
-    Communication, CommunicationChannel, CommunicationDirection,
+    ComparableSet, Communication, CommunicationChannel, CommunicationDirection,
     CommunicationMatchStatus, ComplianceItem, ComplianceItemStatus,
     ComplianceItemType, Demand, DemandRecipientType, DemandType,
     Document, DocumentTemplate, DocumentTemplateFamily, OutboundChannel,
@@ -89,6 +89,18 @@ def _sample_toll(**overrides) -> Toll:
     )
     defaults.update(overrides)
     return Toll(**defaults)
+
+
+def _sample_comparable_set(**overrides) -> ComparableSet:
+    defaults = dict(
+        id=1, demand_id=1, scan_source="kayak", scan_timestamp=datetime(2026, 9, 5, 12, 0),
+        vehicle_class=VehicleClass.SEDAN, date_range_start=date(2026, 9, 5),
+        date_range_end=date(2026, 9, 12),
+        comparables=[{"vendor": "Enterprise", "vehicle": "Camry", "daily_rate": "55.00"}],
+        computed_average=Decimal("55.00"),
+    )
+    defaults.update(overrides)
+    return ComparableSet(**defaults)
 
 
 def _sample_payment(**overrides) -> Payment:
@@ -331,6 +343,31 @@ def test_get_blocked_rentals():
     check("test_get_blocked_rentals", r.status_code == 200 and r.json()[0]["block_reason"] == "x")
 
 
+def test_link_vls_case():
+    linked = _sample_rental(vls_case_id=42)
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch("app.api.repo.link_vls_case", return_value=linked):
+        r = client.post("/rentals/1/vls-case", json={"vls_case_id": 42, "actor": "jed"})
+    check("test_link_vls_case", r.status_code == 200 and r.json()["vls_case_id"] == 42, r.text)
+
+
+def test_link_vls_case_rental_not_found():
+    with patch("app.api.repo.get_rental", return_value=None):
+        r = client.post("/rentals/999/vls-case", json={"vls_case_id": 42, "actor": "jed"})
+    check("test_link_vls_case_rental_not_found", r.status_code == 404, r.text)
+
+
+def test_link_vls_case_bad_vls_case_id_returns_400_not_500():
+    """Real bug found via live staging: an unlinked/nonexistent vls_case_id
+    violates rental_vls_case_id_fkey and must surface as 400, not a bare
+    500 (mocked here since a real FK violation can't be triggered without
+    a DB)."""
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch("app.api.repo.link_vls_case", side_effect=psycopg2.errors.ForeignKeyViolation()):
+        r = client.post("/rentals/1/vls-case", json={"vls_case_id": 999999, "actor": "jed"})
+    check("test_link_vls_case_bad_vls_case_id_returns_400_not_500", r.status_code == 400, r.text)
+
+
 def test_create_proposal():
     with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
          patch("app.api.repo.create_rental_proposal", return_value=_sample_proposal()), \
@@ -463,6 +500,61 @@ def test_get_aging_demands():
     with patch("app.api.repo.list_aging_demands", return_value=[{"id": 1, "days_since_sent": 50}]):
         r = client.get("/demands/aging")
     check("test_get_aging_demands", r.status_code == 200 and r.json()[0]["days_since_sent"] == 50)
+
+
+def test_create_comparable_set():
+    with patch("app.api.repo.get_demand", return_value=_sample_demand()), \
+         patch("app.api.repo.create_comparable_set", return_value=_sample_comparable_set()):
+        r = client.post(
+            "/demands/1/comparable-sets",
+            json={
+                "scan_source": "kayak", "scan_timestamp": "2026-09-05T12:00:00",
+                "date_range_start": "2026-09-05", "date_range_end": "2026-09-12",
+                "comparables": [{"vendor": "Enterprise", "vehicle": "Camry", "daily_rate": "55.00"}],
+                "computed_average": "55.00", "vehicle_class": "sedan", "actor": "jed",
+            },
+        )
+    check("test_create_comparable_set", r.status_code == 200 and r.json()["computed_average"] == "55.00", r.text)
+
+
+def test_create_comparable_set_demand_not_found():
+    with patch("app.api.repo.get_demand", return_value=None):
+        r = client.post(
+            "/demands/999/comparable-sets",
+            json={
+                "scan_source": "kayak", "scan_timestamp": "2026-09-05T12:00:00",
+                "date_range_start": "2026-09-05", "date_range_end": "2026-09-12",
+                "comparables": [], "computed_average": "55.00", "actor": "jed",
+            },
+        )
+    check("test_create_comparable_set_demand_not_found", r.status_code == 404, r.text)
+
+
+def test_create_comparable_set_bad_date_range_returns_400():
+    with patch("app.api.repo.get_demand", return_value=_sample_demand()):
+        r = client.post(
+            "/demands/1/comparable-sets",
+            json={
+                "scan_source": "kayak", "scan_timestamp": "2026-09-05T12:00:00",
+                "date_range_start": "2026-09-12", "date_range_end": "2026-09-05",
+                "comparables": [], "computed_average": "55.00", "actor": "jed",
+            },
+        )
+    check("test_create_comparable_set_bad_date_range_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_comparable_set_bad_vehicle_class_returns_400():
+    with patch("app.api.repo.get_demand", return_value=_sample_demand()):
+        r = client.post(
+            "/demands/1/comparable-sets",
+            json={
+                "scan_source": "kayak", "scan_timestamp": "2026-09-05T12:00:00",
+                "date_range_start": "2026-09-05", "date_range_end": "2026-09-12",
+                "comparables": [], "computed_average": "55.00",
+                "vehicle_class": "not-a-real-class", "actor": "jed",
+            },
+        )
+    check("test_create_comparable_set_bad_vehicle_class_returns_400", r.status_code == 400, r.text)
 
 
 def test_create_toll():
@@ -878,12 +970,17 @@ if __name__ == "__main__":
         test_transition_rental_bad_state_value_returns_400,
         test_transition_rental_db_rejection_returns_400_not_500,
         test_get_blocked_rentals,
+        test_link_vls_case, test_link_vls_case_rental_not_found,
+        test_link_vls_case_bad_vls_case_id_returns_400_not_500,
         test_create_proposal, test_create_proposal_rental_not_found, test_create_proposal_bad_kind,
         test_create_proposal_no_key_configured_returns_503,
         test_create_proposal_missing_header_returns_401, test_create_proposal_wrong_key_returns_401,
         test_get_pending_proposals, test_decide_proposal_accept, test_decide_proposal_bad_status,
         test_create_demand, test_create_demand_carrier_without_name_returns_400,
         test_mark_demand_sent, test_get_aging_demands,
+        test_create_comparable_set, test_create_comparable_set_demand_not_found,
+        test_create_comparable_set_bad_date_range_returns_400,
+        test_create_comparable_set_bad_vehicle_class_returns_400,
         test_create_toll, test_confirm_toll, test_confirm_toll_not_found,
         test_create_payment, test_create_payment_authorize_net_without_txn_id_returns_400,
         test_create_payment_zero_amount_returns_400,

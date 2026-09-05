@@ -1237,3 +1237,90 @@ gaps are now largely closed (staff, vehicle, renter, compliance, document
 templates all have routes) — worth checking whether any other repository
 function still lacks HTTP surface before starting frontend work, which
 ADR-001 v2 §6/§9 places last regardless.
+
+## 2026-09-05 (continuous cron cycle) — vls-case linkage + comparable-set HTTP routes closed; real FK-violation 500 fixed
+
+**Starting point:** clean tree, fetched origin/main first (matched local
+HEAD at 820966c, no concurrent-session drift). `patch` flagged its usual
+"modified by sibling subagent, never read" warning on both app/api.py and
+test_api.py mid-edit; `git diff --stat`/`git diff` after each write showed
+only my own intended changes both times, same stale/false-positive
+tracker pattern noted in a prior cycle's entry -- not a real collision.
+
+**Built this cycle:** closed the last two data-layer-function-with-no-route
+gaps in the claim-generation-machine chain (rental -> demand -> JP
+litigation), same shape as every prior cycle's HTTP-surface work:
+
+- **`POST /rentals/{rental_id}/vls-case`** (`repo.link_vls_case()`,
+  existing since migrations/007, previously unrouted). Sets
+  `elektrica.rental.vls_case_id` -- required before a `needs_served` ->
+  `in_litigation` transition will pass the DB trigger gate. Deliberately
+  a separate route from `transition_rental`, per `link_vls_case()`'s own
+  docstring: linking a case and actually entering litigation are two
+  different real-world events. Does NOT create the `vls.case` row itself
+  -- that stays VLS's own write path; this route only records the
+  linkage once VLS (or a human with VLS access) hands back a case id.
+  No VLS case data was read or written to build or test this beyond the
+  FK constraint's own error message.
+- **`POST /demands/{demand_id}/comparable-sets`** (`repo.create_comparable_set()`,
+  existing since migrations/006, previously unrouted). Handoff §2.8's
+  frozen market-comparable snapshot -- `elektrica.comparable_set` is
+  immutable-from-creation by DB trigger, so this is create-only by design,
+  no update/delete route exists or ever will. Validates demand existence
+  (404) and vehicle_class enum (400) before hitting the DB.
+- 8 new `test_api.py` cases (95/95 direct run, 122/122 pytest): success +
+  not-found + bad-enum + bad-date-range cases for comparable-sets;
+  success + not-found + a mocked FK-violation regression case for
+  vls-case linkage.
+
+**Real bug found and fixed via live staging verification (not the mocked
+test suite) -- same lesson as the document-templates duplicate-version
+500 two cycles ago, now recurring a third time on a different table:**
+`POST /rentals/{rental_id}/vls-case` with a `vls_case_id` that doesn't
+exist in `vls.case` raised an uncaught `psycopg2.errors.ForeignKeyViolation`
+(`rental_vls_case_id_fkey`) and returned a bare 500. Fixed by catching
+`ForeignKeyViolation` in the route and returning 400 (client-input error,
+not a server fault) -- same discipline as the vehicle-VIN and
+document-template uniqueness routes. Added a mocked regression test
+(`test_link_vls_case_bad_vls_case_id_returns_400_not_500`,
+`side_effect=psycopg2.errors.ForeignKeyViolation()`) so this can't
+silently regress, even though the mocked suite still can't catch the
+*original* miss on its own -- a real `TestClient` + real Postgres run
+remains the only thing that actually catches this class of bug in this
+codebase, three-for-three now (route-ordering, unique-constraint,
+foreign-key).
+
+**Live-verified against real staging Postgres, real HTTP** (uvicorn,
+`neondb_owner` -> `SET ROLE elektrica_app`, ports 8342 then 8351 after
+the fix): confirmed 5 existing rentals / 3 existing demands present via a
+direct psycopg2 read before starting (no `vls.case` rows queried or
+touched, staying inside the VLS hard boundary -- confirmed the FK error's
+own message was sufficient to diagnose and fix the bug without needing to
+read case data). Rental 6, `vls_case_id=12345` (deliberately nonexistent)
+-> 500 (the bug, first server) -> fixed -> restarted server -> re-ran
+identical request -> 400, rental row confirmed unchanged
+(`vls_case_id` still null, rollback held) -> nonexistent rental id ->
+404. Comparable-set: created id=1 on demand 1 (`scan_source=kayak`,
+`vehicle_class=sedan`, `computed_average=55.00`) -> read back directly
+from Postgres to confirm the JSONB `comparables` column round-tripped
+correctly -> nonexistent demand id -> 404 -> bad date range (end before
+start) -> 400. Both servers killed after their runs; `netstat` confirmed
+no LISTENING socket left either time.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every other smoke run in this repo): `elektrica.comparable_set`
+id=1 (`created_by='cron-smoke'`), rental 6 untouched (the vls-case link
+never actually succeeded, by design of the test).
+
+**Not done / explicitly deferred (unchanged):** no auth/session layer on
+any route; `insurer_payment`/`adjuster` still export-blocked, no ETA;
+frontend not started; migration 007's `vls.case` grant-scope flag for Jed
+still open (staging-only, not urgent).
+
+**Next up:** with vls-case linkage and comparable-sets now routed, every
+repository function that had HTTP-route coverage as a gap appears closed
+-- worth a fresh full pass over `app/repository.py` vs `app/api.py` next
+cycle to double check nothing new slipped in, then likely time to start
+looking at frontend scaffolding (ADR-001 v2 §6/§9 places it last, but the
+backend build-order queue is now thin) or revisit the
+`insurer_payment`/`adjuster` export-block question with Jed.
