@@ -590,9 +590,45 @@ def create_compliance_item(cur, item: ComplianceItem, actor: str) -> ComplianceI
     return _compliance_item_from_row(cur.fetchone())
 
 
+def get_compliance_item(cur, compliance_item_id: int) -> Optional[ComplianceItem]:
+    cur.execute(
+        "SELECT * FROM elektrica.compliance_item WHERE id = %s",
+        (compliance_item_id,),
+    )
+    row = cur.fetchone()
+    return _compliance_item_from_row(row) if row else None
+
+
 def list_compliance_items_expiring_soon(cur) -> list[dict]:
     cur.execute("SELECT * FROM elektrica.compliance_items_expiring_soon")
     return list(cur.fetchall())
+
+
+def update_compliance_item_status(
+    cur, compliance_item_id: int, status: ComplianceItemStatus,
+    related_document_id: Optional[int], actor: str,
+) -> ComplianceItem:
+    """Advances a compliance item's lifecycle (active -> expiring_soon ->
+    expired -> renewed). related_document_id is accepted here (not just
+    at creation) because the typical real transition -- 'renewed' -- is
+    exactly the moment a new document (the renewed license/registration/
+    policy) exists to link, per elektrica.compliance_item's own FK
+    (migrations/008). Pass the existing value through if a caller isn't
+    changing it; this function does not merge/preserve automatically,
+    same explicit-write discipline as advance_rental_state."""
+    cur.execute(
+        """
+        UPDATE elektrica.compliance_item
+        SET status = %s, related_document_id = %s, updated_at = now(), updated_by = %s
+        WHERE id = %s
+        RETURNING *
+        """,
+        (status.value, related_document_id, actor, compliance_item_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"No compliance_item with id={compliance_item_id}")
+    return _compliance_item_from_row(row)
 
 
 def _compliance_item_from_row(row) -> ComplianceItem:

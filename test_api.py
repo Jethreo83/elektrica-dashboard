@@ -19,7 +19,8 @@ from fastapi.testclient import TestClient
 from app.api import app, get_cursor
 from app.models import (
     Communication, CommunicationChannel, CommunicationDirection,
-    CommunicationMatchStatus, Demand, DemandRecipientType, DemandType,
+    CommunicationMatchStatus, ComplianceItem, ComplianceItemStatus,
+    ComplianceItemType, Demand, DemandRecipientType, DemandType,
     Document, DocumentTemplate, DocumentTemplateFamily, OutboundChannel,
     OutboundLog, Payment, PaymentSource, ProposalKind, ProposalStatus,
     Renter, Rental, RentalBilledTo, RentalEvent, RentalProposal, RentalState,
@@ -109,6 +110,16 @@ def _sample_document_template(**overrides) -> DocumentTemplate:
     defaults = dict(id=1, family=DocumentTemplateFamily.RENTAL_DEMAND, version=1, template_ref="gdoc:abc")
     defaults.update(overrides)
     return DocumentTemplate(**defaults)
+
+
+def _sample_compliance_item(**overrides) -> ComplianceItem:
+    defaults = dict(
+        id=1, item_type=ComplianceItemType.DEALER_LICENSE, description="Dealer license renewal",
+        expiration_date=date(2027, 1, 1), vehicle_id=None, status=ComplianceItemStatus.ACTIVE,
+        related_document_id=None,
+    )
+    defaults.update(overrides)
+    return ComplianceItem(**defaults)
 
 
 def _sample_document(**overrides) -> Document:
@@ -507,6 +518,68 @@ def test_compliance_expiring_soon():
     check("test_compliance_expiring_soon", r.status_code == 200 and len(r.json()) == 1)
 
 
+def test_create_compliance_item():
+    with patch("app.api.repo.create_compliance_item", return_value=_sample_compliance_item()):
+        r = client.post(
+            "/compliance-items",
+            json={
+                "item_type": "dealer_license", "description": "Dealer license renewal",
+                "expiration_date": "2027-01-01", "actor": "jed",
+            },
+        )
+    check("test_create_compliance_item", r.status_code == 200 and r.json()["item_type"] == "dealer_license", r.text)
+
+
+def test_create_compliance_item_vehicle_not_found():
+    with patch("app.api.repo.get_vehicle", return_value=None):
+        r = client.post(
+            "/compliance-items",
+            json={
+                "item_type": "insurance", "description": "Policy renewal", "vehicle_id": 999,
+                "expiration_date": "2027-01-01", "actor": "jed",
+            },
+        )
+    check("test_create_compliance_item_vehicle_not_found", r.status_code == 404, r.text)
+
+
+def test_create_compliance_item_bad_item_type_returns_400():
+    r = client.post(
+        "/compliance-items",
+        json={"item_type": "not_a_type", "description": "x", "expiration_date": "2027-01-01", "actor": "jed"},
+    )
+    check("test_create_compliance_item_bad_item_type_returns_400", r.status_code == 400, r.text)
+
+
+def test_get_compliance_item_found():
+    with patch("app.api.repo.get_compliance_item", return_value=_sample_compliance_item()):
+        r = client.get("/compliance-items/1")
+    check("test_get_compliance_item_found", r.status_code == 200 and r.json()["id"] == 1, r.text)
+
+
+def test_get_compliance_item_not_found():
+    with patch("app.api.repo.get_compliance_item", return_value=None):
+        r = client.get("/compliance-items/999")
+    check("test_get_compliance_item_not_found", r.status_code == 404, r.text)
+
+
+def test_update_compliance_item_status():
+    renewed = _sample_compliance_item(status=ComplianceItemStatus.RENEWED, related_document_id=5)
+    with patch("app.api.repo.update_compliance_item_status", return_value=renewed):
+        r = client.post("/compliance-items/1/status", json={"status": "renewed", "actor": "jed", "related_document_id": 5})
+    check("test_update_compliance_item_status", r.status_code == 200 and r.json()["status"] == "renewed", r.text)
+
+
+def test_update_compliance_item_status_not_found():
+    with patch("app.api.repo.update_compliance_item_status", side_effect=ValueError("No compliance_item with id=999")):
+        r = client.post("/compliance-items/999/status", json={"status": "renewed", "actor": "jed"})
+    check("test_update_compliance_item_status_not_found", r.status_code == 404, r.text)
+
+
+def test_update_compliance_item_status_bad_status_returns_400():
+    r = client.post("/compliance-items/1/status", json={"status": "not_a_status", "actor": "jed"})
+    check("test_update_compliance_item_status_bad_status_returns_400", r.status_code == 400, r.text)
+
+
 def test_provision_staff():
     with patch("app.api.repo.provision_staff_user_for_existing_person", return_value=_sample_staff()):
         r = client.post(
@@ -607,6 +680,32 @@ def test_get_active_document_template_not_found():
 def test_get_active_document_template_bad_family_returns_400():
     r = client.get("/document-templates/not_a_family")
     check("test_get_active_document_template_bad_family_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_document_template():
+    with patch("app.api.repo.create_document_template", return_value=_sample_document_template(id=2, version=2, template_ref="gdoc:v2")):
+        r = client.post(
+            "/document-templates",
+            json={"family": "rental_demand", "version": 2, "template_ref": "gdoc:v2", "actor": "jed"},
+        )
+    check("test_create_document_template", r.status_code == 200 and r.json()["template_ref"] == "gdoc:v2", r.text)
+
+
+def test_create_document_template_bad_family_returns_400():
+    r = client.post(
+        "/document-templates",
+        json={"family": "not_a_family", "version": 1, "template_ref": "gdoc:x", "actor": "jed"},
+    )
+    check("test_create_document_template_bad_family_returns_400", r.status_code == 400, r.text)
+
+
+def test_create_document_template_duplicate_returns_409():
+    with patch("app.api.repo.create_document_template", side_effect=psycopg2.errors.UniqueViolation()):
+        r = client.post(
+            "/document-templates",
+            json={"family": "rental_demand", "version": 1, "template_ref": "gdoc:dupe", "actor": "jed"},
+        )
+    check("test_create_document_template_duplicate_returns_409", r.status_code == 409, r.text)
 
 
 def test_create_document():
@@ -789,6 +888,11 @@ if __name__ == "__main__":
         test_create_payment, test_create_payment_authorize_net_without_txn_id_returns_400,
         test_create_payment_zero_amount_returns_400,
         test_vehicle_revenue_summary, test_compliance_expiring_soon,
+        test_create_compliance_item, test_create_compliance_item_vehicle_not_found,
+        test_create_compliance_item_bad_item_type_returns_400,
+        test_get_compliance_item_found, test_get_compliance_item_not_found,
+        test_update_compliance_item_status, test_update_compliance_item_status_not_found,
+        test_update_compliance_item_status_bad_status_returns_400,
         test_provision_staff, test_provision_staff_bad_role_returns_400,
         test_provision_staff_domain_rejection_returns_400,
         test_provision_staff_insufficient_privilege_returns_403,
@@ -797,6 +901,8 @@ if __name__ == "__main__":
         test_set_staff_active_insufficient_privilege_returns_403,
         test_get_active_document_template_found, test_get_active_document_template_not_found,
         test_get_active_document_template_bad_family_returns_400,
+        test_create_document_template, test_create_document_template_bad_family_returns_400,
+        test_create_document_template_duplicate_returns_409,
         test_create_document, test_create_document_output_ref_without_hash_returns_400,
         test_get_document_found, test_get_document_not_found, test_get_documents_never_sent,
         test_create_outbound_log, test_create_outbound_log_document_not_found,

@@ -1163,3 +1163,77 @@ blocked; frontend not started; consider whether a Fleet-board "list all
 vehicles" or "list all renters" route is worth adding next (handoff §2.5
 only explicitly needs Out/Available, which already existed) before moving
 to something else in the build-order queue.
+
+## 2026-09-04 (continuous cron cycle, later still) — Compliance-item + document-template HTTP routes closed; duplicate-template 500 fixed
+
+**Starting point:** clean tree, 3 commits ahead already pushed (Vehicle/
+Renter routes cycle). No concurrent-session drift found this cycle (fetched
+origin/main first, matched local HEAD).
+
+**Built this cycle:** two more "data layer done, no HTTP route" gaps closed,
+same shape as staff-provisioning/vehicle/renter in prior cycles:
+
+- **Compliance items** (bot's original v1 scope, ADR-001 v2 §3,
+  migrations/008). `app/repository.py`: added `get_compliance_item()` and
+  `update_compliance_item_status()` (create + list-expiring-soon already
+  existed with no route). `app/api.py`: `POST /compliance-items` (vehicle_id
+  existence check -> 404, bad item_type/status enum -> 400), `GET
+  /compliance-items/{id}`, `POST /compliance-items/{id}/status` (drives the
+  active -> expiring_soon -> expired -> renewed lifecycle, accepts an
+  optional `related_document_id` since the real-world "renewed" transition
+  is exactly when a new document exists to link). `elektrica_app` has full
+  SELECT/INSERT/UPDATE on `compliance_item` (migration 008) -- no
+  privileged-connection caveat here, unlike staff_user.
+- **Document templates** (`platform.document_template`, migration 009).
+  `app/api.py`: `POST /document-templates` — registers a new template
+  version. Deliberately does NOT deactivate any prior active version of the
+  same family (no UPDATE grant for `elektrica_app` on this table, no
+  product requirement yet for that behavior) — flagged in the route's own
+  docstring, not silently worked around.
+- 12 new `test_api.py` cases (88/88 direct run, 115/115 pytest).
+
+**Real bug found and fixed via live staging verification (not the mocked
+test suite):** `POST /document-templates` on a duplicate `(family,
+version)` — which IS unique at the DB level
+(`document_template_family_version_unique`) — raised an uncaught
+`psycopg2.errors.UniqueViolation` and returned a bare 500. Mocked
+`test_api.py` cases never exercise a real constraint, so this only showed
+up running the real route against real staging Postgres. Fixed by catching
+`UniqueViolation` in the route and returning 409, same discipline as the
+vehicle VIN-uniqueness route already in this file. Added a mocked
+regression test (`test_create_document_template_duplicate_returns_409`,
+`side_effect=psycopg2.errors.UniqueViolation()`) so this doesn't silently
+regress even though the mocked suite can't catch the *original* miss on
+its own — the lesson from the vehicles/revenue-summary route-ordering bug
+two cycles ago (mocked tests miss framework/DB-level behavior; a real
+TestClient + real Postgres run is what actually catches it) held again
+here, just one layer lower (DB constraint instead of HTTP routing).
+
+**Live-verified against real staging Postgres, real HTTP** (uvicorn on
+`127.0.0.1:8263`, `neondb_owner` staging connection, confirmed 11
+`elektrica.*` tables present via `neon connection-string staging --psql`
+before starting): created compliance_item id=1 (dealer_license, no
+vehicle) -> read back by id -> nonexistent vehicle_id 999999 -> 404 ->
+bad item_type -> 400 -> status transition to `renewed` -> nonexistent id
+-> 404 -> bad status enum -> 400 -> `/compliance/expiring-soon` still
+200. Document templates: GET rental_demand found the pre-existing active
+v1 (from an earlier cycle's smoke data) -> POST duplicate (rental_demand,
+v1) -> 500 (the bug) -> fixed -> restarted server -> re-ran -> 409 (correct)
+-> POST (rental_demand, v2) -> 200, new active row. Server killed after
+each run; `netstat` confirmed no LISTENING socket left both times. A
+scratch file holding the staging connection string
+(`.staging_url_tmp.txt`, gitignored-equivalent — never committed) was
+deleted immediately after use, same "never let a connection string sit on
+disk longer than needed" discipline as every other cycle.
+
+**Not done / explicitly deferred (unchanged):** no auth/session layer on
+any route; `insurer_payment`/`adjuster` still export-blocked, no ETA;
+frontend not started; migration 007's `vls.case` grant-scope flag for Jed
+still open (staging-only, not urgent).
+
+**Next up:** `insurer_payment`/`adjuster` remain the biggest genuinely
+export-blocked item. Otherwise the build-order queue's data-layer-to-route
+gaps are now largely closed (staff, vehicle, renter, compliance, document
+templates all have routes) — worth checking whether any other repository
+function still lacks HTTP surface before starting frontend work, which
+ADR-001 v2 §6/§9 places last regardless.

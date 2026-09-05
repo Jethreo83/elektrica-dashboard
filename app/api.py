@@ -55,6 +55,9 @@ from pydantic import BaseModel
 from app import db
 from app import repository as repo
 from app.models import (
+    ComplianceItem,
+    ComplianceItemStatus,
+    ComplianceItemType,
     Demand,
     DemandRecipientType,
     DemandType,
@@ -63,6 +66,7 @@ from app.models import (
     CommunicationDirection,
     CommunicationMatchStatus,
     Document,
+    DocumentTemplate,
     DocumentTemplateFamily,
     EventSource,
     OutboundChannel,
@@ -437,6 +441,56 @@ class CommunicationDecisionRequest(BaseModel):
     actor: str
 
 
+class ComplianceItemIn(BaseModel):
+    """Bot's original v1 scope (ADR-001 v2 §3), handoff-independent --
+    dealer_license/registration/insurance/other, migrations/008."""
+    item_type: str
+    description: str
+    expiration_date: date
+    actor: str
+    vehicle_id: Optional[int] = None
+    status: str = "active"
+    related_document_id: Optional[int] = None
+
+
+class ComplianceItemOut(BaseModel):
+    id: int
+    item_type: str
+    description: str
+    expiration_date: date
+    status: str
+    vehicle_id: Optional[int] = None
+    related_document_id: Optional[int] = None
+
+
+class ComplianceItemStatusUpdate(BaseModel):
+    status: str
+    actor: str
+    related_document_id: Optional[int] = None
+
+
+class DocumentTemplateIn(BaseModel):
+    """Admin-only: registers a new active template version. Same
+    'requires a privileged connection' caveat as staff-provisioning --
+    elektrica_app has SELECT+INSERT (migration 009), no UPDATE, so
+    deactivating a superseded version is a separate deploy-time step
+    this route deliberately does not attempt (no elektrica_app grant
+    for it, and no product requirement yet to flip is_active via API)."""
+    family: str
+    version: int
+    template_ref: str
+    actor: str
+    is_active: bool = True
+
+
+class DocumentTemplateOut(BaseModel):
+    id: int
+    family: str
+    version: int
+    template_ref: str
+    is_active: bool
+
+
 def _document_to_out(d: Document) -> DocumentOut:
     return DocumentOut(
         id=d.id, template_id=d.template_id, source_table=d.source_table,
@@ -522,6 +576,21 @@ def _staff_to_out(s) -> StaffUserOut:
         id=s.id, person_id=s.person_id, role=s.role.value,
         google_email=s.google_email, active=s.active,
         provisioned_by_staff_user_id=s.provisioned_by_staff_user_id,
+    )
+
+
+def _compliance_item_to_out(c) -> ComplianceItemOut:
+    return ComplianceItemOut(
+        id=c.id, item_type=c.item_type.value, description=c.description,
+        expiration_date=c.expiration_date, status=c.status.value,
+        vehicle_id=c.vehicle_id, related_document_id=c.related_document_id,
+    )
+
+
+def _document_template_to_out(t) -> DocumentTemplateOut:
+    return DocumentTemplateOut(
+        id=t.id, family=t.family.value, version=t.version,
+        template_ref=t.template_ref, is_active=t.is_active,
     )
 
 
@@ -869,6 +938,55 @@ def get_payments(rental_id: int, cur=Depends(get_cursor)):
 
 
 # --- Compliance --------------------------------------------------------------
+# Bot's original v1 scope (ADR-001 v2 §3, docs/original-bot-plan.md §4) --
+# dealer_license/registration/insurance/other tracking with 30-day renewal
+# reminders. repository functions (create_compliance_item,
+# list_compliance_items_expiring_soon) existed since migrations/008 with
+# zero HTTP surface; get_compliance_item + update_compliance_item_status
+# added to app/repository.py this cycle to close that gap, same shape as
+# every other "data layer done, route wired later" item in this build.
+# Unlike staff_user, elektrica_app has full SELECT/INSERT/UPDATE on
+# compliance_item (migration 008) -- no privileged-connection caveat here.
+
+@app.post("/compliance-items", response_model=ComplianceItemOut)
+def create_compliance_item(body: ComplianceItemIn, cur=Depends(get_cursor)):
+    if body.vehicle_id is not None and repo.get_vehicle(cur, body.vehicle_id) is None:
+        raise HTTPException(status_code=404, detail=f"No vehicle with id={body.vehicle_id}")
+    try:
+        item_type = ComplianceItemType(body.item_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"item_type={body.item_type!r} must be one of {[t.value for t in ComplianceItemType]}")
+    try:
+        status = ComplianceItemStatus(body.status)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"status={body.status!r} must be one of {[s.value for s in ComplianceItemStatus]}")
+    item = ComplianceItem(
+        item_type=item_type, description=body.description, expiration_date=body.expiration_date,
+        vehicle_id=body.vehicle_id, status=status, related_document_id=body.related_document_id,
+    )
+    return _compliance_item_to_out(repo.create_compliance_item(cur, item, body.actor))
+
+
+@app.get("/compliance-items/{compliance_item_id}", response_model=ComplianceItemOut)
+def get_compliance_item(compliance_item_id: int, cur=Depends(get_cursor)):
+    item = repo.get_compliance_item(cur, compliance_item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"No compliance_item with id={compliance_item_id}")
+    return _compliance_item_to_out(item)
+
+
+@app.post("/compliance-items/{compliance_item_id}/status", response_model=ComplianceItemOut)
+def update_compliance_item_status(compliance_item_id: int, body: ComplianceItemStatusUpdate, cur=Depends(get_cursor)):
+    try:
+        status = ComplianceItemStatus(body.status)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"status={body.status!r} must be one of {[s.value for s in ComplianceItemStatus]}")
+    try:
+        item = repo.update_compliance_item_status(cur, compliance_item_id, status, body.related_document_id, body.actor)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _compliance_item_to_out(item)
+
 
 @app.get("/compliance/expiring-soon")
 def get_compliance_expiring_soon(cur=Depends(get_cursor)):
@@ -968,6 +1086,40 @@ def get_active_document_template(family: str, cur=Depends(get_cursor)):
     if template is None:
         raise HTTPException(status_code=404, detail=f"No active document_template for family={family!r}")
     return {"id": template.id, "family": template.family.value, "version": template.version, "template_ref": template.template_ref}
+
+
+@app.post("/document-templates", response_model=DocumentTemplateOut)
+def create_document_template(body: DocumentTemplateIn, cur=Depends(get_cursor)):
+    """Registers a new template version. Does NOT deactivate any prior
+    version of the same family -- elektrica_app has no UPDATE grant on
+    platform.document_template (migration 009), and this repo has no
+    product requirement yet for multiple simultaneously-active versions
+    per family vs. a human/admin-script deactivation step. Callers of
+    GET /document-templates/{family} filtering on is_active=true will
+    see whichever active row(s) exist; if a caller posts a second active
+    version for the same family without deactivating the first, that is
+    a data-hygiene decision outside this route's scope today, not a
+    500-worthy error -- same 'flag, don't silently work around' posture
+    as this file's other documented gaps.
+
+    (family, version) is UNIQUE at the DB level
+    (document_template_family_version_unique, migration 005/009) -- caught
+    here and surfaced as 409, not 500, same discipline as the vehicle VIN-
+    uniqueness route. Unlike that route this checks the DB constraint
+    directly rather than a pre-check query, since there is no existing
+    get_document_template_by_family_version() repository helper and the
+    constraint itself is the actual source of truth."""
+    try:
+        fam = DocumentTemplateFamily(body.family)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"family={body.family!r} must be one of {[f.value for f in DocumentTemplateFamily]}")
+    template = DocumentTemplate(
+        family=fam, version=body.version, template_ref=body.template_ref, is_active=body.is_active,
+    )
+    try:
+        return _document_template_to_out(repo.create_document_template(cur, template, body.actor))
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(status_code=409, detail=f"document_template family={fam.value!r} version={body.version!r} already exists")
 
 
 @app.post("/documents", response_model=DocumentOut)
