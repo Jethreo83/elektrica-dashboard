@@ -1,0 +1,312 @@
+/* theme.css — Elektrica Rentals placeholder brand system.
+
+   OPEN QUESTION FOR JED: no brand colors/logo were found anywhere in
+   this repo (checked docs/*.md, README.md) or in shell-dashboard's
+   docs. Placeholder palette below is an EV/electric-green + graphite
+   scheme chosen to be plausible for a Tesla/EV rental fleet, NOT
+   sourced from any real Elektrica asset. Swap these variables (and
+   drop a real logo file next to vls-logo.jpg's usage in App.tsx) once
+   Jed provides the real brand -- every color used in this file is a
+   CSS variable so that's a small, contained change. */
+
+:root {
+  --ek-green: #0a7a4f;
+  --ek-green-dark: #05512f;
+  --ek-green-light: #12a26a;
+  --ek-graphite: #1c2126;
+  --ek-slate: #2e3742;
+  --ek-cream: #f5f7f6;
+  --ek-ink: #14181b;
+  --ek-gray: #6b7480;
+  --ek-gray-light: #e2e6e4;
+  --ek-white: #ffffff;
+  --ek-danger: #b3402f;
+  --ek-danger-bg: #f8e6e1;
+  --ek-warn: #b8860b;
+  --ek-warn-bg: #fbf1d9;
+  --ek-success: #0a7a4f;
+  --ek-radius: 8px;
+  --ek-shadow: 0 1px 3px rgba(20, 24, 27, 0.08), 0 1px 2px rgba(20, 24, 27, 0.06);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  background: var(--ek-cream);
+  color: var(--ek-ink);
+}
+
+.ek-app { display: flex; min-height: 100vh; }
+
+/* --------------------------------------------------------------------- */
+/* Sidebar                                                                */
+/* --------------------------------------------------------------------- */
+
+.ek-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, var(--ek-graphite) 0%, var(--ek-slate) 100%);
+  padding: 24px 18px 28px;
+  color: var(--ek-white);
+}
+
+.ek-brand-logo {
+  margin: 0 0 24px;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+  color: var(--ek-green-light);
+}
+.ek-brand-logo small { display: block; font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.55); letter-spacing: 0.4px; }
+
+.ek-nav a {
+  display: block;
+  color: rgba(255, 255, 255, 0.75);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-bottom: 3px;
+  border-left: 3px solid transparent;
+  transition: background 0.12s ease;
+}
+
+.ek-nav a:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ek-white);
+}
+
+.ek-nav a.active {
+  background: rgba(18, 162, 106, 0.16);
+  color: var(--ek-green-light);
+  border-left-color: var(--ek-green-light);
+}
+
+/* --------------------------------------------------------------------- */
+/* Main content area                                                     */
+/* --------------------------------------------------------------------- */
+
+.ek-main { flex: 1; padding: 32px 40px; max-width: 1200px; }
+
+.ek-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid var(--ek-gray-light);
+}
+
+.ek-topbar h1 {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--ek-graphite);
+  margin: 0;
+  letter-spacing: -0.2px;
+}
+
+.ek-user-chip {
+  font-size: 12.5px;
+  color: var(--ek-gray);
+  background: var(--ek-white);
+  padding: 7px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--ek-gray-light);
+}
+
+.ek-signout {
+  background: none;
+  border: 1px solid var(--ek-gray-light);
+  color: var(--ek-graphite);
+  padding: 7px 14px;
+  border-radius: 20px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-left: 10px;
+}
+
+.ek-signout:hover { background: var(--ek-gray-light); }
+
+/* --------------------------------------------------------------------- */
+/* Stat cards                                                             */
+/* --------------------------------------------------------------------- */
+
+.ek-cards { display: flex; gap: 14px; margin-bottom: 28px; flex-wrap: wrap; }
+
+.ek-card {
+  background: var(--ek-white);
+  border: 1px solid var(--ek-gray-light);
+  border-radius: var(--ek-radius);
+  padding: 16px 20px;
+  flex: 1;
+  min-width: 130px;
+  box-shadow: var(--ek-shadow);
+}
+
+.ek-card .label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--ek-gray);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.ek-card .value {
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--ek-graphite);
+}
+
+.ek-card .value.warn { color: var(--ek-warn); }
+.ek-card .value.danger { color: var(--ek-danger); }
+.ek-card .value.ok { color: var(--ek-success); }
+
+/* --------------------------------------------------------------------- */
+/* Tables                                                                 */
+/* --------------------------------------------------------------------- */
+
+table.ek-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--ek-white);
+  border-radius: var(--ek-radius);
+  overflow: hidden;
+  box-shadow: var(--ek-shadow);
+}
+
+table.ek-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--ek-gray);
+  font-weight: 700;
+  padding: 13px 16px;
+  background: var(--ek-cream);
+  border-bottom: 2px solid var(--ek-gray-light);
+  cursor: default;
+}
+
+table.ek-table th.sortable { cursor: pointer; user-select: none; }
+table.ek-table th.sortable:hover { color: var(--ek-green); }
+
+table.ek-table td {
+  padding: 13px 16px;
+  font-size: 13.5px;
+  border-bottom: 1px solid var(--ek-gray-light);
+  color: var(--ek-ink);
+}
+
+table.ek-table tr:last-child td { border-bottom: none; }
+table.ek-table tr:hover td { background: rgba(18, 162, 106, 0.05); }
+
+/* --------------------------------------------------------------------- */
+/* Badges                                                                 */
+/* --------------------------------------------------------------------- */
+
+.ek-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ek-badge.ok { background: #e5f4ed; color: var(--ek-success); }
+.ek-badge.warn { background: var(--ek-warn-bg); color: var(--ek-warn); }
+.ek-badge.danger { background: var(--ek-danger-bg); color: var(--ek-danger); }
+.ek-badge.neutral { background: var(--ek-gray-light); color: var(--ek-gray); }
+
+/* --------------------------------------------------------------------- */
+/* Links, buttons, forms                                                 */
+/* --------------------------------------------------------------------- */
+
+a.ek-link {
+  color: var(--ek-green);
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 12.5px;
+}
+a.ek-link:hover { text-decoration: underline; }
+
+.ek-btn {
+  background: var(--ek-green);
+  color: var(--ek-white);
+  border: none;
+  padding: 8px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.ek-btn:hover { background: var(--ek-green-light); }
+.ek-btn:disabled { background: var(--ek-gray-light); color: var(--ek-gray); cursor: not-allowed; }
+
+.ek-btn.danger { background: var(--ek-danger); }
+.ek-btn.danger:hover { background: #c14b38; }
+
+.ek-btn.secondary { background: var(--ek-white); color: var(--ek-graphite); border: 1px solid var(--ek-gray-light); }
+.ek-btn.secondary:hover { background: var(--ek-gray-light); }
+
+.ek-input, .ek-select {
+  border: 1px solid var(--ek-gray-light);
+  border-radius: 6px;
+  padding: 7px 12px;
+  font-size: 13.5px;
+  color: var(--ek-ink);
+  background: var(--ek-white);
+  font-family: inherit;
+}
+.ek-input:focus, .ek-select:focus {
+  outline: none;
+  border-color: var(--ek-green-light);
+  box-shadow: 0 0 0 3px rgba(18, 162, 106, 0.2);
+}
+
+.ek-section {
+  background: var(--ek-white);
+  border: 1px solid var(--ek-gray-light);
+  border-radius: var(--ek-radius);
+  padding: 20px 24px;
+  margin-bottom: 20px;
+  box-shadow: var(--ek-shadow);
+}
+
+.ek-section h2 {
+  font-size: 15px;
+  margin: 0 0 14px;
+  color: var(--ek-graphite);
+}
+
+.ek-field-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.ek-field-row label { font-size: 12px; color: var(--ek-gray); font-weight: 600; margin-right: 4px; }
+
+/* --------------------------------------------------------------------- */
+/* Login screen                                                          */
+/* --------------------------------------------------------------------- */
+
+.ek-login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ek-graphite);
+}
+.ek-login-card {
+  background: var(--ek-white);
+  border-radius: 12px;
+  padding: 36px 40px;
+  width: 420px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+}
+.ek-login-logo { font-size: 22px; font-weight: 800; color: var(--ek-green); }
+.ek-login-sub { color: var(--ek-gray); font-size: 13px; margin: 4px 0 20px; }

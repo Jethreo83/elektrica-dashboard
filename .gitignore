@@ -1,9 +1,12 @@
 .env
 .env.*
+!.env.example
+!web/.env.example
 *credentials*.json
 *token*.json
 node_modules/
 dist/
+*.tsbuildinfo
 data/snapshots/
 
 # Real customer/renter PII from Google Sheets exports - never commit.
