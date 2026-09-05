@@ -1853,6 +1853,22 @@ class InsuranceCarrierAliasIn(BaseModel):
     actor: str
 
 
+class InsuranceCarrierUpdateIn(BaseModel):
+    """Partial update -- every contact field optional, `name`/`aliases`
+    deliberately excluded (see repo.update_insurance_carrier's docstring:
+    name is the canonical unique key, aliases has its own dedicated
+    POST /insurance-carriers/{id}/aliases route already). Omitted fields
+    are left unchanged; there is no way to explicitly null out a field via
+    this route today (same limitation as the COALESCE-based repo function
+    it calls) -- not needed yet, not built speculatively."""
+    actor: str
+    fax: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    claims_mailing_address: Optional[str] = None
+    notes: Optional[str] = None
+
+
 class AdjusterIn(BaseModel):
     name: str
     actor: str
@@ -1937,6 +1953,26 @@ def add_insurance_carrier_alias(carrier_id: int, body: InsuranceCarrierAliasIn, 
     try:
         return _insurance_carrier_to_out(
             repo.add_insurance_carrier_alias(cur, carrier_id, body.alias, body.actor)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.patch("/insurance-carriers/{carrier_id}", response_model=InsuranceCarrierOut)
+def update_insurance_carrier(carrier_id: int, body: InsuranceCarrierUpdateIn, cur=Depends(get_cursor)):
+    """Closes the BACKLOG.md gap: 'CarriersPage can create a carrier but
+    not edit an existing one's fax/email/phone/aliases after creation
+    (only POST /insurance-carriers/{id}/aliases exists as a partial-update
+    route today).' PATCH (not PUT) because it's a genuine partial update --
+    omitted fields are left unchanged, per repo.update_insurance_carrier's
+    own COALESCE-based semantics."""
+    try:
+        return _insurance_carrier_to_out(
+            repo.update_insurance_carrier(
+                cur, carrier_id, body.actor,
+                fax=body.fax, email=body.email, phone=body.phone,
+                claims_mailing_address=body.claims_mailing_address, notes=body.notes,
+            )
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

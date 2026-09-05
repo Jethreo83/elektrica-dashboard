@@ -1329,6 +1329,23 @@ def test_add_insurance_carrier_alias_not_found():
     check("test_add_insurance_carrier_alias_not_found", r.status_code == 404, r.text)
 
 
+def test_update_insurance_carrier():
+    with patch("app.api.repo.update_insurance_carrier", return_value=_sample_carrier(fax="555-9999")) as m:
+        r = client.patch("/insurance-carriers/1", json={"actor": "jed", "fax": "555-9999"})
+    check(
+        "test_update_insurance_carrier",
+        r.status_code == 200 and r.json()["fax"] == "555-9999"
+        and m.call_args.kwargs.get("email") is None,
+        r.text,
+    )
+
+
+def test_update_insurance_carrier_not_found():
+    with patch("app.api.repo.update_insurance_carrier", side_effect=ValueError("No insurance_carrier with id=999")):
+        r = client.patch("/insurance-carriers/999", json={"actor": "jed", "fax": "555-9999"})
+    check("test_update_insurance_carrier_not_found", r.status_code == 404, r.text)
+
+
 def test_create_adjuster():
     with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
          patch("app.api.repo.create_adjuster", return_value=_sample_adjuster()):
@@ -1609,6 +1626,7 @@ if __name__ == "__main__":
         test_find_insurance_carrier_not_found_returns_null_not_404,
         test_get_insurance_carrier_found, test_get_insurance_carrier_not_found,
         test_add_insurance_carrier_alias, test_add_insurance_carrier_alias_not_found,
+        test_update_insurance_carrier, test_update_insurance_carrier_not_found,
         test_create_adjuster, test_create_adjuster_carrier_not_found,
         test_create_adjuster_duplicate_at_same_carrier_returns_409,
         test_list_adjusters_for_carrier, test_list_adjusters_for_carrier_not_found,

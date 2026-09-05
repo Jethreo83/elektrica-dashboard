@@ -2710,3 +2710,99 @@ still export-blocked.
 **Committed:** `app/repository.py`, `app/api.py`, `test_api.py`,
 `web/src/api.ts`, `web/src/pages/CarriersPage.tsx`.
 
+---
+
+## 2026-09-05 (cron cycle) — carrier edit-after-creation closed (BACKLOG.md's last remaining small item); live-verified against real staging
+
+**Starting point this cycle:** fetched origin/main first — up to date at
+`5a58bb6`, clean tree. Ran `python -m pytest` (184/184) and
+`python test_api.py` (145/145) before touching anything.
+
+**What this closes:** the last still-open item from `docs/BACKLOG.md`'s
+CarriersPage entries: "CarriersPage can create a carrier but not edit an
+existing one's fax/email/phone/aliases after creation (only
+`POST /insurance-carriers/{id}/aliases` exists as a partial-update route
+today)." Closed top to bottom:
+
+- `app/repository.py`: `update_insurance_carrier()` — COALESCE-based
+  partial update of `fax`/`email`/`phone`/`claims_mailing_address`/`notes`.
+  Deliberately does NOT touch `name` (canonical unique key — a rename is a
+  bigger operation than this covers) or `aliases` (already has its own
+  dedicated append-only route). Omitted fields are left unchanged, not
+  nulled — a caller wanting to explicitly clear a field must pass `""`,
+  same convention as this file's other partial-update functions.
+- `app/api.py`: `PATCH /insurance-carriers/{id}` (`InsuranceCarrierUpdateIn`
+  model, same optional-field shape as the repo function) — 404 via
+  `ValueError` on a nonexistent id, same discipline as
+  `add_insurance_carrier_alias`'s existing 404 path.
+- `test_api.py`: 2 new mocked cases (`test_update_insurance_carrier` —
+  confirms an omitted field reaches the repo call as `None`, i.e. the
+  COALESCE semantics are actually being exercised, not just a 200 status;
+  `test_update_insurance_carrier_not_found`). 186/186 pytest (was 184),
+  147/147 manual runner (was 145).
+- `web/src/api.ts`: `updateInsuranceCarrier()` (PATCH) +
+  `addInsuranceCarrierAlias()` (POST — existed on the backend since
+  migration 013's app layer but had no frontend caller at all until now).
+- `web/src/pages/CarriersPage.tsx`: new "Edit Carrier" section above the
+  market-rate exhibit, shown once a carrier is selected — five-field edit
+  form (fax/email/phone/claims_mailing_address/notes) pre-populated from
+  the selected carrier's current values via a `useEffect` keyed on
+  `selectedCarrierId` (so switching carriers never shows stale data from a
+  previous selection), plus a separate alias-add form and a read-only
+  aliases display. Explicitly does not offer to rename the carrier or
+  remove an alias, matching the backend's own scope.
+- `cd web && npx tsc -b` clean.
+
+**Live-verified against real staging Postgres, real HTTP** (resolved the
+genuine staging connection via `neon connection-string staging
+--project-id aged-art-92489373 --role-name neondb_owner` for host +
+the Neon API's `reveal_password` for the credential — this shell's own
+exported `DATABASE_URL` was not trusted without checking, per the
+standing lesson several prior cycles have logged about that variable
+pointing at production; confirmed via `neon branches list` first which
+branch is actually staging):
+1. Repository-layer script (`scripts/_cron_verify_carrier_edit.py`,
+   deleted after use): created a real carrier, called
+   `update_insurance_carrier()` setting only fax+email, confirmed phone
+   (never set) stayed untouched by the COALESCE rather than going
+   `NULL` — the core correctness property this feature exists to
+   guarantee — added an alias, and confirmed the 404 path for a
+   nonexistent id. All passed.
+2. Real HTTP round trip: booted a scratch `uvicorn` (port 8811) against
+   the real staging DB with a throwaway `JWT_SECRET`, minted a matching
+   HS256 JWT for `jed@elektricarentals.com` (a real, active `owner` row
+   in `elektrica.staff_user` on staging) to pass `require_staff`
+   legitimately. `PATCH /insurance-carriers/15` (Acme Insurance) setting
+   fax+email -> 200, `phone` stayed `null` in the response (matches the
+   repo-layer check) -> `PATCH /insurance-carriers/999999` -> 404 ->
+   `GET /insurance-carriers/15` confirmed the update persisted -> `POST
+   /insurance-carriers/15/aliases` -> alias appended -> a second `PATCH`
+   setting `claims_mailing_address`/`notes` confirmed the previously-set
+   fax/email/alias all survived untouched (COALESCE holding across
+   multiple sequential partial updates, not just a single call). Server
+   killed after (`taskkill` on the actual `LISTENING` PID from `netstat`,
+   not the launcher's own reported PID — same distinction a prior
+   cycle's entry already flagged as necessary); confirmed no `LISTENING`
+   socket remained afterward.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every other smoke run in this repo): `platform.insurance_carrier`
+id=21 (`CronVerifyCarrier-*`, repo-layer script); real carrier id=15
+(Acme Insurance) now carries a permanent fax/email/claims-address/notes/
+alias set from this cycle's live HTTP verification — a genuine data
+change to an existing smoke-test row, not throwaway, but harmless (Acme
+Insurance is itself a smoke-test carrier from an earlier cycle, not a
+real Jed-entered carrier).
+
+**Not done / explicitly deferred (unchanged):** no way to rename a
+carrier or remove an alias (not asked for, would need its own design —
+alias removal in particular needs a decision on whether a demand
+already matched via that alias should be affected); `elektrica.vehicle`
+promotion still pending Jed's explicit sign-off; migration 007's
+`vls.case` grant-scope flag still open; real Fleet columns still needs
+Jed's scoping decision; `insurer_payment` historical import (handoff
+§2.9) still export-blocked.
+
+**Committed:** `app/repository.py`, `app/api.py`, `test_api.py`,
+`web/src/api.ts`, `web/src/pages/CarriersPage.tsx`.
+

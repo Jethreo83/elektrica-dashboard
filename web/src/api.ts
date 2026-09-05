@@ -468,6 +468,11 @@ export const api = {
     name: string; aliases?: string[]; fax?: string; email?: string; phone?: string;
     claims_mailing_address?: string; notes?: string; actor: string;
   }) => apiFetch<InsuranceCarrier>('/insurance-carriers', { method: 'POST', body: JSON.stringify(body) }).then(coerceCarrier),
+  updateInsuranceCarrier: (carrierId: number, body: {
+    fax?: string; email?: string; phone?: string; claims_mailing_address?: string; notes?: string; actor: string;
+  }) => apiFetch<InsuranceCarrier>(`/insurance-carriers/${carrierId}`, { method: 'PATCH', body: JSON.stringify(body) }).then(coerceCarrier),
+  addInsuranceCarrierAlias: (carrierId: number, body: { alias: string; actor: string }) =>
+    apiFetch<InsuranceCarrier>(`/insurance-carriers/${carrierId}/aliases`, { method: 'POST', body: JSON.stringify(body) }).then(coerceCarrier),
   createAdjuster: (carrierId: number, body: { name: string; phone?: string; email?: string; notes?: string; actor: string }) =>
     apiFetch<Adjuster>(`/insurance-carriers/${carrierId}/adjusters`, { method: 'POST', body: JSON.stringify(body) }).then(coerceAdjuster),
 

@@ -1238,6 +1238,42 @@ def add_insurance_carrier_alias(cur, carrier_id: int, alias: str, actor: str) ->
     return _insurance_carrier_from_row(row)
 
 
+def update_insurance_carrier(
+    cur, carrier_id: int, actor: str,
+    fax: Optional[str] = None, email: Optional[str] = None, phone: Optional[str] = None,
+    claims_mailing_address: Optional[str] = None, notes: Optional[str] = None,
+) -> InsuranceCarrier:
+    """Partial update of the four contact fields BACKLOG.md flagged as
+    missing ("CarriersPage can create a carrier but not edit an existing
+    one's fax/email/phone/aliases after creation"). Deliberately does NOT
+    touch `name` (that's the unique canonical-record key -- a rename is a
+    bigger operation than this route covers, and `aliases` already has its
+    own dedicated `add_insurance_carrier_alias` path) or `aliases` (same
+    reason). Uses COALESCE so a caller only sending the fields they changed
+    doesn't null out the others -- callers that want to explicitly CLEAR a
+    field must pass an empty string, not omit it, same convention as the
+    rest of this file's partial-update-style functions.
+    """
+    cur.execute(
+        """
+        UPDATE platform.insurance_carrier
+        SET fax = COALESCE(%s, fax),
+            email = COALESCE(%s, email),
+            phone = COALESCE(%s, phone),
+            claims_mailing_address = COALESCE(%s, claims_mailing_address),
+            notes = COALESCE(%s, notes),
+            updated_by = %s
+        WHERE id = %s
+        RETURNING *
+        """,
+        (fax, email, phone, claims_mailing_address, notes, actor, carrier_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"No insurance_carrier with id={carrier_id}")
+    return _insurance_carrier_from_row(row)
+
+
 def _insurance_carrier_from_row(row) -> InsuranceCarrier:
     return InsuranceCarrier(
         id=row["id"], name=row["name"], aliases=list(row["aliases"]) if row["aliases"] is not None else [],

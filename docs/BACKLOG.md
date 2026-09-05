@@ -7,6 +7,22 @@ from scratch or, worse, do it differently by accident.
 
 ---
 
+## RESOLVED 2026-09-05 (cron cycle) — carrier edit-after-creation
+
+**What:** the last still-open CarriersPage small item ("CarriersPage can
+create a carrier but not edit an existing one's fax/email/phone/aliases
+after creation"). Closed via `PATCH /insurance-carriers/{id}` +
+frontend edit form + alias-add wiring. See `docs/BUILD_LOG.md`'s matching
+entry for the full writeup (186/186 pytest, 147/147 manual runner, live
+HTTP verification against real staging proving COALESCE partial-update
+semantics hold across multiple sequential edits). Deliberately still no
+carrier-rename or alias-removal route — not asked for, would need its own
+design decision (alias removal in particular touches whether an already-
+matched demand should be affected). Nothing further to do here; kept as a
+resolved marker.
+
+---
+
 ## RESOLVED 2026-09-05 (cron cycle, later still) — POST /demands/{id}/status live-verified against real staging; frontend gap it exposed closed
 
 **What:** the entry directly above (`RESOLVED ... elektrica.demand HTTP
