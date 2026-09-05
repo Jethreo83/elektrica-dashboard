@@ -1406,6 +1406,32 @@ def test_get_carrier_insurer_payments():
     )
 
 
+def test_get_carrier_insurer_payments_with_filters_passed_through():
+    """CLOSED 2026-09-05 (cron cycle) -- BACKLOG.md's date-range/
+    vehicle-class filtering gap. Confirms the query params actually
+    reach repo.list_insurer_payments_for_carrier() as real args, not
+    just accepted-and-ignored."""
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch("app.api.repo.list_insurer_payments_for_carrier", return_value=[_sample_insurer_payment()]) as mock_list:
+        r = client.get(
+            "/insurance-carriers/1/insurer-payments",
+            params={"date_from": "2026-01-01", "date_to": "2026-01-31", "vehicle_class": "sedan"},
+        )
+    check("test_get_carrier_insurer_payments_with_filters_passed_through", r.status_code == 200, r.text)
+    args = mock_list.call_args.args
+    check(
+        "test_get_carrier_insurer_payments_with_filters_passed_through_args",
+        args[1] == 1 and str(args[2]) == "2026-01-01" and str(args[3]) == "2026-01-31" and args[4] == VehicleClass.SEDAN,
+        str(args),
+    )
+
+
+def test_get_carrier_insurer_payments_bad_vehicle_class_returns_400():
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()):
+        r = client.get("/insurance-carriers/1/insurer-payments", params={"vehicle_class": "not_a_real_class"})
+    check("test_get_carrier_insurer_payments_bad_vehicle_class_returns_400", r.status_code == 400, r.text)
+
+
 def test_get_carrier_insurer_payments_carrier_not_found():
     with patch("app.api.repo.get_insurance_carrier", return_value=None):
         r = client.get("/insurance-carriers/999/insurer-payments")
@@ -1431,6 +1457,35 @@ def test_get_carrier_market_rate_exhibit():
         r.status_code == 200 and r.json()["claim_count"] == 3 and r.json()["carrier_id"] == 1,
         r.text,
     )
+
+
+def test_get_carrier_market_rate_exhibit_with_filters_passed_through():
+    """Same closed BACKLOG.md gap as the insurer-payments list route
+    above -- the exhibit's own date_from/date_to/vehicle_class filters,
+    verified reaching the repository layer as real typed args."""
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch(
+             "app.api.repo.get_carrier_market_rate_exhibit",
+             return_value={"claim_count": 1, "avg_amount_demanded": Decimal("500.00"),
+                           "avg_amount_paid": Decimal("450.00"), "avg_market_rate": Decimal("50.00")},
+         ) as mock_exhibit:
+        r = client.get(
+            "/insurance-carriers/1/market-rate-exhibit",
+            params={"date_from": "2026-02-01", "vehicle_class": "suv"},
+        )
+    check("test_get_carrier_market_rate_exhibit_with_filters_passed_through", r.status_code == 200, r.text)
+    args = mock_exhibit.call_args.args
+    check(
+        "test_get_carrier_market_rate_exhibit_with_filters_passed_through_args",
+        args[1] == 1 and str(args[2]) == "2026-02-01" and args[3] is None and args[4] == VehicleClass.SUV,
+        str(args),
+    )
+
+
+def test_get_carrier_market_rate_exhibit_bad_vehicle_class_returns_400():
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()):
+        r = client.get("/insurance-carriers/1/market-rate-exhibit", params={"vehicle_class": "not_a_real_class"})
+    check("test_get_carrier_market_rate_exhibit_bad_vehicle_class_returns_400", r.status_code == 400, r.text)
 
 
 def test_get_carrier_market_rate_exhibit_no_claims_yet():
@@ -1559,8 +1614,12 @@ if __name__ == "__main__":
         test_list_adjusters_for_carrier, test_list_adjusters_for_carrier_not_found,
         test_get_adjuster_found, test_get_adjuster_not_found,
         test_get_carrier_insurer_payments, test_get_carrier_insurer_payments_carrier_not_found,
+        test_get_carrier_insurer_payments_with_filters_passed_through,
+        test_get_carrier_insurer_payments_bad_vehicle_class_returns_400,
         test_get_carrier_market_rate_exhibit, test_get_carrier_market_rate_exhibit_no_claims_yet,
         test_get_carrier_market_rate_exhibit_carrier_not_found,
+        test_get_carrier_market_rate_exhibit_with_filters_passed_through,
+        test_get_carrier_market_rate_exhibit_bad_vehicle_class_returns_400,
         test_get_rental_insurer_payments, test_get_rental_insurer_payments_rental_not_found,
         test_get_insurer_payment_found, test_get_insurer_payment_not_found,
     ]

@@ -1300,16 +1300,35 @@ def get_insurer_payment(cur, insurer_payment_id: int) -> Optional[InsurerPayment
     return _insurer_payment_from_row(row) if row else None
 
 
-def list_insurer_payments_for_carrier(cur, carrier_id: int) -> list[InsurerPayment]:
+def list_insurer_payments_for_carrier(
+    cur, carrier_id: int,
+    date_from: Optional["date"] = None, date_to: Optional["date"] = None,
+    vehicle_class: Optional["VehicleClass"] = None,
+) -> list[InsurerPayment]:
     """Handoff §2.8's own filter example ("filter by carrier, date
-    range, vehicle class"). Date-range/vehicle-class filtering is left
-    to the caller (client-side or a future query-param addition) same
-    as every other list_* route in this repo -- no query-param
-    filtering exists anywhere yet (see list_demands_for_rental's own
-    docstring for the same convention)."""
+    range, vehicle class"). CLOSED 2026-09-05 (cron cycle) -- previously
+    left entirely to the caller (BACKLOG.md's small-items list); now a
+    real query-param-shaped filter, same optional-args-append-to-WHERE
+    convention as every other filtered list_* route already uses
+    elsewhere in this file (kept purely additive: all three args default
+    to None, so an unfiltered call behaves exactly as before -- no
+    existing caller's behavior changes). date_from/date_to filter on
+    resolved_at::date (inclusive both ends); vehicle_class filters on the
+    exact enum value."""
+    clauses = ["carrier_id = %s"]
+    params: list = [carrier_id]
+    if date_from is not None:
+        clauses.append("resolved_at::date >= %s")
+        params.append(date_from)
+    if date_to is not None:
+        clauses.append("resolved_at::date <= %s")
+        params.append(date_to)
+    if vehicle_class is not None:
+        clauses.append("vehicle_class = %s")
+        params.append(vehicle_class.value if hasattr(vehicle_class, "value") else vehicle_class)
     cur.execute(
-        "SELECT * FROM elektrica.insurer_payment WHERE carrier_id = %s ORDER BY resolved_at DESC",
-        (carrier_id,),
+        f"SELECT * FROM elektrica.insurer_payment WHERE {' AND '.join(clauses)} ORDER BY resolved_at DESC",
+        tuple(params),
     )
     return [_insurer_payment_from_row(r) for r in cur.fetchall()]
 
@@ -1322,27 +1341,43 @@ def list_insurer_payments_for_rental(cur, rental_id: int) -> list[InsurerPayment
     return [_insurer_payment_from_row(r) for r in cur.fetchall()]
 
 
-def get_carrier_market_rate_exhibit(cur, carrier_id: int) -> dict:
+def get_carrier_market_rate_exhibit(
+    cur, carrier_id: int,
+    date_from: Optional["date"] = None, date_to: Optional["date"] = None,
+    vehicle_class: Optional["VehicleClass"] = None,
+) -> dict:
     """The actual exhibit handoff §2.8 describes: "this same carrier
     paid market rate on N prior claims" -- N, plus average
     amount_demanded/amount_paid, over every resolved insurer_payment row
-    for this carrier. Deliberately a simple aggregate, not a
-    vehicle_class/date-range-parameterized report -- those filters are
-    exactly list_insurer_payments_for_carrier()'s job; a caller wanting
-    the exhibit for a specific slice filters that list client-side, same
-    convention as everywhere else in this repo. Returns zeros/None
+    for this carrier. CLOSED 2026-09-05 (cron cycle): now takes the same
+    optional date_from/date_to/vehicle_class filters as
+    list_insurer_payments_for_carrier() (same reasoning -- handoff §2.8
+    treats both as the same query need, only one of the two had the
+    filter built until this cycle; kept purely additive, all default to
+    None so an unfiltered call is unchanged). Returns zeros/None
     fields (not a 404) when a carrier has no resolved insurer_payment
     rows yet -- "no history yet" is a valid, expected state for a
     brand-new carrier, not an error."""
+    clauses = ["carrier_id = %s"]
+    params: list = [carrier_id]
+    if date_from is not None:
+        clauses.append("resolved_at::date >= %s")
+        params.append(date_from)
+    if date_to is not None:
+        clauses.append("resolved_at::date <= %s")
+        params.append(date_to)
+    if vehicle_class is not None:
+        clauses.append("vehicle_class = %s")
+        params.append(vehicle_class.value if hasattr(vehicle_class, "value") else vehicle_class)
     cur.execute(
-        """
+        f"""
         SELECT count(*) AS claim_count,
                AVG(amount_demanded) AS avg_amount_demanded,
                AVG(amount_paid) AS avg_amount_paid,
                AVG(market_rate_at_time) AS avg_market_rate
-        FROM elektrica.insurer_payment WHERE carrier_id = %s
+        FROM elektrica.insurer_payment WHERE {' AND '.join(clauses)}
         """,
-        (carrier_id,),
+        tuple(params),
     )
     row = cur.fetchone()
     return dict(row) if row else {"claim_count": 0}

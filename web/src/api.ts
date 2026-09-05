@@ -288,6 +288,21 @@ function coerceQueueItem(q: any): PersonMatchQueueItem {
 function coerceCarrier(c: any): InsuranceCarrier {
   return { ...c, id: Number(c.id) };
 }
+
+// Shared by getCarrierInsurerPayments/getCarrierMarketRateExhibit --
+// builds a '?date_from=...&date_to=...&vehicle_class=...' suffix from
+// only the keys actually present, or '' when none are set (so an
+// unfiltered call's URL is byte-identical to before this filter
+// support existed).
+function buildFilterQuery(filters?: { date_from?: string; date_to?: string; vehicle_class?: string }): string {
+  if (!filters) return '';
+  const params = new URLSearchParams();
+  if (filters.date_from) params.set('date_from', filters.date_from);
+  if (filters.date_to) params.set('date_to', filters.date_to);
+  if (filters.vehicle_class) params.set('vehicle_class', filters.vehicle_class);
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
 function coerceAdjuster(a: any): Adjuster {
   return { ...a, id: Number(a.id), carrier_id: Number(a.carrier_id) };
 }
@@ -461,8 +476,19 @@ export const api = {
   // created exclusively by the migration-016 trigger when a
   // carrier-recipient demand resolves (see api.advanceDemandStatus
   // above), never POSTed directly by this frontend.
-  getCarrierInsurerPayments: (carrierId: number) =>
-    apiFetch<InsurerPayment[]>(`/insurance-carriers/${carrierId}/insurer-payments`),
-  getCarrierMarketRateExhibit: (carrierId: number) =>
-    apiFetch<CarrierMarketRateExhibit>(`/insurance-carriers/${carrierId}/market-rate-exhibit`),
+  //
+  // date_from/date_to/vehicle_class: CLOSED 2026-09-05 (cron cycle) --
+  // BACKLOG.md's small-items list flagged both routes as
+  // date-range/vehicle-class filterable in the backend (handoff §2.8)
+  // but client-side-only in this frontend. Both now build a real query
+  // string; all three params are optional so an unfiltered call is
+  // unchanged from before.
+  getCarrierInsurerPayments: (
+    carrierId: number,
+    filters?: { date_from?: string; date_to?: string; vehicle_class?: string },
+  ) => apiFetch<InsurerPayment[]>(`/insurance-carriers/${carrierId}/insurer-payments${buildFilterQuery(filters)}`),
+  getCarrierMarketRateExhibit: (
+    carrierId: number,
+    filters?: { date_from?: string; date_to?: string; vehicle_class?: string },
+  ) => apiFetch<CarrierMarketRateExhibit>(`/insurance-carriers/${carrierId}/market-rate-exhibit${buildFilterQuery(filters)}`),
 };

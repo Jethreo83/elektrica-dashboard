@@ -2036,27 +2036,64 @@ def _insurer_payment_to_out(p: InsurerPayment) -> InsurerPaymentOut:
 
 
 @app.get("/insurance-carriers/{carrier_id}/insurer-payments", response_model=list[InsurerPaymentOut])
-def get_carrier_insurer_payments(carrier_id: int, cur=Depends(get_cursor)):
+def get_carrier_insurer_payments(
+    carrier_id: int,
+    date_from: Optional[date] = None, date_to: Optional[date] = None,
+    vehicle_class: Optional[str] = None,
+    cur=Depends(get_cursor),
+):
     """Handoff §2.8: "filter by carrier, date range, vehicle class ->
-    exportable table for a demand or a JP filing." Date-range/
-    vehicle-class filtering is client-side for now (this route returns
-    every resolved insurer_payment row for the carrier, newest first),
-    same no-query-param-filtering convention as every other list_* route
-    in this file."""
+    exportable table for a demand or a JP filing." CLOSED 2026-09-05
+    (cron cycle) -- date_from/date_to/vehicle_class are now real
+    query-param filters passed through to the repository layer (were
+    previously "client-side only", flagged as a small BACKLOG.md item
+    after CarriersPage first shipped). All three remain optional; an
+    unfiltered call behaves exactly as before."""
     if repo.get_insurance_carrier(cur, carrier_id) is None:
         raise HTTPException(status_code=404, detail=f"No insurance_carrier with id={carrier_id}")
-    return [_insurer_payment_to_out(p) for p in repo.list_insurer_payments_for_carrier(cur, carrier_id)]
+    vc = None
+    if vehicle_class is not None:
+        try:
+            vc = VehicleClass(vehicle_class)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"vehicle_class={vehicle_class!r} must be one of {[c.value for c in VehicleClass]}",
+            )
+    return [
+        _insurer_payment_to_out(p)
+        for p in repo.list_insurer_payments_for_carrier(cur, carrier_id, date_from, date_to, vc)
+    ]
 
 
 @app.get("/insurance-carriers/{carrier_id}/market-rate-exhibit", response_model=CarrierMarketRateExhibitOut)
-def get_carrier_market_rate_exhibit(carrier_id: int, cur=Depends(get_cursor)):
+def get_carrier_market_rate_exhibit(
+    carrier_id: int,
+    date_from: Optional[date] = None, date_to: Optional[date] = None,
+    vehicle_class: Optional[str] = None,
+    cur=Depends(get_cursor),
+):
     """The concrete exhibit handoff §2.8 exists for: "this same carrier
-    paid market rate on N prior claims." Returns claim_count=0 and null
-    averages (not 404) for a carrier with no resolved insurer_payment
-    rows yet -- that is a valid, expected state, not an error."""
+    paid market rate on N prior claims." CLOSED 2026-09-05 (cron cycle):
+    same date_from/date_to/vehicle_class filters as the insurer-payments
+    list route directly above -- both were flagged together in
+    BACKLOG.md as the exhibit's two first-class query needs, closed in
+    the same cycle rather than one at a time. Returns claim_count=0 and
+    null averages (not 404) for a carrier with no resolved
+    insurer_payment rows yet -- that is a valid, expected state, not an
+    error."""
     if repo.get_insurance_carrier(cur, carrier_id) is None:
         raise HTTPException(status_code=404, detail=f"No insurance_carrier with id={carrier_id}")
-    result = repo.get_carrier_market_rate_exhibit(cur, carrier_id)
+    vc = None
+    if vehicle_class is not None:
+        try:
+            vc = VehicleClass(vehicle_class)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"vehicle_class={vehicle_class!r} must be one of {[c.value for c in VehicleClass]}",
+            )
+    result = repo.get_carrier_market_rate_exhibit(cur, carrier_id, date_from, date_to, vc)
     return CarrierMarketRateExhibitOut(carrier_id=carrier_id, **result)
 
 

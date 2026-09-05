@@ -42,10 +42,36 @@ further to do on this specific gap; kept as a resolved marker.
   fax/email/phone/aliases after creation (only
   `POST /insurance-carriers/{id}/aliases` exists as a partial-update
   route today).
-- The market-rate exhibit has no date-range/vehicle-class filtering in
-  either the API or the UI yet (handoff §2.8 mentions both as
-  first-class query needs) -- current routes return every row for the
-  carrier, filtering would be client-side only today.
+
+---
+
+## RESOLVED 2026-09-05 (cron cycle, later still) -- insurer-payment exhibit date-range/vehicle-class filtering
+
+**What:** the entry directly above flagged "the market-rate exhibit has
+no date-range/vehicle-class filtering in either the API or the UI yet
+(handoff §2.8 mentions both as first-class query needs) -- current
+routes return every row for the carrier, filtering would be client-side
+only today." Closed this cycle, full stack:
+
+- `app/repository.py`: `list_insurer_payments_for_carrier()` /
+  `get_carrier_market_rate_exhibit()` now take optional
+  `date_from`/`date_to`/`vehicle_class` args.
+- `app/api.py`: both corresponding routes accept the same three as real
+  query params, with `vehicle_class` validated against the real enum
+  (400 on a bad value).
+- `web/src/api.ts` / `web/src/pages/CarriersPage.tsx`: new
+  `buildFilterQuery()` helper + date-range/vehicle-class filter
+  controls + "Clear filters" button above the exhibit table.
+
+See `docs/BUILD_LOG.md`'s matching entry for the full writeup (4 new
+tests, live HTTP verification against real staging proving the filters
+are real -- `vehicle_class=van` on carrier 15's only sedan claim
+returns `claim_count:0`, not the unfiltered `1`). Nothing further to
+do on this specific gap; kept as a resolved marker.
+
+**Still open, not touched this cycle:** carrier edit-after-creation
+(the other small item listed directly above -- no route exists for it
+beyond the aliases-only partial-update route).
 
 ---
 

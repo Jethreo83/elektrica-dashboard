@@ -22,6 +22,16 @@ export default function CarriersPage() {
   const [newAdjusterName, setNewAdjusterName] = useState('');
   const [creatingAdjuster, setCreatingAdjuster] = useState(false);
 
+  // Handoff §2.8's own two named filters for the exhibit + resolved-
+  // claims history. CLOSED 2026-09-05 (cron cycle) -- these were
+  // previously accepted by neither the backend query params nor this
+  // page's own fetch calls (BACKLOG.md small-item). Empty string means
+  // "unfiltered" for all three, matching buildFilterQuery's own
+  // falsy-key-omitted behavior in api.ts.
+  const [filterDateFrom, setFilterDateFrom] = useState('');
+  const [filterDateTo, setFilterDateTo] = useState('');
+  const [filterVehicleClass, setFilterVehicleClass] = useState('');
+
   const loadCarriers = () => {
     api.listInsuranceCarriers().then(setCarriers).catch((e) => setError(e.body?.detail ?? e.message));
   };
@@ -31,9 +41,14 @@ export default function CarriersPage() {
   useEffect(() => {
     if (selectedCarrierId == null) { setAdjusters([]); setPayments(null); setExhibit(null); return; }
     api.listAdjustersForCarrier(selectedCarrierId).then(setAdjusters).catch(() => setAdjusters([]));
-    api.getCarrierInsurerPayments(selectedCarrierId).then(setPayments).catch(() => setPayments([]));
-    api.getCarrierMarketRateExhibit(selectedCarrierId).then(setExhibit).catch(() => setExhibit(null));
-  }, [selectedCarrierId]);
+    const filters = {
+      date_from: filterDateFrom || undefined,
+      date_to: filterDateTo || undefined,
+      vehicle_class: filterVehicleClass || undefined,
+    };
+    api.getCarrierInsurerPayments(selectedCarrierId, filters).then(setPayments).catch(() => setPayments([]));
+    api.getCarrierMarketRateExhibit(selectedCarrierId, filters).then(setExhibit).catch(() => setExhibit(null));
+  }, [selectedCarrierId, filterDateFrom, filterDateTo, filterVehicleClass]);
 
   const handleCreateCarrier = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,6 +132,40 @@ export default function CarriersPage() {
             <p style={{ fontSize: 12, color: 'var(--ek-gray)', marginTop: -6, marginBottom: 14 }}>
               "This same carrier paid market rate on N prior claims" — the exhibit for a lowball offer.
             </p>
+            <div className="ek-field-row" style={{ marginBottom: 14 }}>
+              <label>From</label>
+              <input
+                className="ek-input" type="date" style={{ width: 150 }}
+                value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)}
+              />
+              <label>To</label>
+              <input
+                className="ek-input" type="date" style={{ width: 150 }}
+                value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)}
+              />
+              <label>Vehicle class</label>
+              <select
+                className="ek-input" style={{ width: 130 }}
+                value={filterVehicleClass} onChange={(e) => setFilterVehicleClass(e.target.value)}
+              >
+                <option value="">All</option>
+                <option value="ev">EV</option>
+                <option value="gas">Gas</option>
+                <option value="suv">SUV</option>
+                <option value="truck">Truck</option>
+                <option value="sedan">Sedan</option>
+                <option value="van">Van</option>
+                <option value="other">Other</option>
+              </select>
+              {(filterDateFrom || filterDateTo || filterVehicleClass) && (
+                <button
+                  className="ek-btn secondary"
+                  onClick={() => { setFilterDateFrom(''); setFilterDateTo(''); setFilterVehicleClass(''); }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
             {exhibit === null ? <p>Loading…</p> : (
               <table className="ek-table">
                 <thead><tr><th>Claim Count</th><th>Avg Demanded</th><th>Avg Paid</th><th>Avg Market Rate</th></tr></thead>

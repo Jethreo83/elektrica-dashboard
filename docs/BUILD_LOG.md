@@ -2628,3 +2628,85 @@ small, no design decision needed, natural next-cycle items.
 no backend app/ changes this cycle -- pure frontend wiring of
 already-built, now live-verified backend routes.
 
+---
+
+## 2026-09-05 (cron cycle, later still) -- insurer-payment exhibit date-range/vehicle-class filtering closed (BACKLOG.md small item); live-verified against real staging
+
+**Starting point this cycle:** fetched origin/main -- 1 new commit since
+my last known HEAD (`01ddefb`, Jed's own CORS-preflight-vs-custom-auth-
+middleware fix). Pulled clean, `python -m pytest` 180/180 green before
+touching anything.
+
+**What this closes:** the previous cycle's `docs/BACKLOG.md` entry
+explicitly flagged two small, no-design-decision-needed items after
+CarriersPage first shipped -- carrier edit-after-create (still open,
+no route exists for it beyond `POST /insurance-carriers/{id}/aliases`,
+not touched this cycle) and "the market-rate exhibit has no
+date-range/vehicle-class filtering in either the API or the UI yet...
+current routes return every row for the carrier, filtering would be
+client-side only today." Closed the second one this cycle, top to
+bottom (repository -> API -> frontend -> tests -> live verification):
+
+- `app/repository.py`: `list_insurer_payments_for_carrier()` and
+  `get_carrier_market_rate_exhibit()` both gained optional
+  `date_from`/`date_to`/`vehicle_class` args, appended to the WHERE
+  clause only when present -- purely additive, an unfiltered call is
+  byte-identical to before.
+- `app/api.py`: both routes
+  (`GET /insurance-carriers/{id}/insurer-payments`,
+  `GET /insurance-carriers/{id}/market-rate-exhibit`) now accept
+  `date_from`/`date_to`/`vehicle_class` query params, validate
+  `vehicle_class` against the real `VehicleClass` enum (400 with the
+  full valid-value list on a bad one, same pattern as
+  `create_comparable_set`'s existing vehicle_class validation) before
+  passing through to the repository layer.
+- `web/src/api.ts`: new `buildFilterQuery()` helper (only emits keys
+  actually set, `''` when none -- so an unfiltered frontend call's URL
+  is unchanged); `getCarrierInsurerPayments`/`getCarrierMarketRateExhibit`
+  both take an optional `filters` arg now.
+- `web/src/pages/CarriersPage.tsx`: date-from/date-to/vehicle-class
+  filter controls above the exhibit table, a "Clear filters" button
+  that appears only when a filter is actually set, both API calls now
+  pass the live filter state and re-fetch on any filter change (added
+  to the existing `useEffect`'s dependency array alongside
+  `selectedCarrierId`).
+
+**Tests:** 4 new `test_api.py` cases (filter args reach the repository
+layer as real typed values -- checked via `mock.call_args.args`, not
+just a 200 status; bad `vehicle_class` -> 400, for both routes). Both
+suites green after: `python -m pytest` 184/184 (was 180), manual
+`python test_api.py` 145/145 (was 141). `cd web && npx tsc -b` clean.
+
+**Live-verified against real staging Postgres** (uvicorn port 8733,
+`neondb_owner` connection resolved via `neon connection-string staging
+--project-id aged-art-92489373 --role-name neondb_owner` + Neon API's
+`reveal_password` -- confirmed genuinely staging via
+`current_database()`/`inet_server_addr()` before connecting, same
+discipline as every prior cycle's live-verification; this shell's
+exported `DATABASE_URL` was again the production endpoint
+(`ep-damp-bird-...`), not used): real carrier id=15's own resolved
+`insurer_payment` row (vehicle_class='sedan', resolved_at 2026-09-05) --
+`GET .../insurer-payments?vehicle_class=sedan` -> includes it;
+`?vehicle_class=van` -> `[]` (real filter, not a no-op);
+`?date_from=2027-01-01` (future) -> `[]`;
+`?date_from=2026-01-01` (past) -> includes it;
+`?vehicle_class=bogus` -> 400. Same four shapes repeated against
+`.../market-rate-exhibit` -- `vehicle_class=sedan` ->
+`claim_count:1`, `vehicle_class=van` -> `claim_count:0` (nulls, not an
+error), `vehicle_class=bogus` -> 400. Server killed after; `netstat`
+confirmed no `LISTENING` socket remained (only expected client-side
+`TIME_WAIT`).
+
+**Not done / explicitly deferred (unchanged):** `CarriersPage` still
+cannot edit an existing carrier's fax/email/phone/aliases post-creation
+(BACKLOG.md's other small item from last cycle, not touched this
+cycle -- no route exists for it beyond the aliases-only
+`POST /insurance-carriers/{id}/aliases`); `elektrica.vehicle` promotion
+still pending Jed's explicit sign-off; migration 007's `vls.case`
+grant-scope flag still open; real Fleet columns still needs Jed's
+scoping decision; `insurer_payment` historical import (handoff §2.9)
+still export-blocked.
+
+**Committed:** `app/repository.py`, `app/api.py`, `test_api.py`,
+`web/src/api.ts`, `web/src/pages/CarriersPage.tsx`.
+
