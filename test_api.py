@@ -24,7 +24,7 @@ from app.models import (
     Document, DocumentTemplate, DocumentTemplateFamily, InsuranceCarrier, OutboundChannel,
     OutboundLog, Payment, PaymentSource, ProposalKind, ProposalStatus,
     Renter, Rental, RentalBilledTo, RentalEvent, RentalProposal, RentalState,
-    EventSource, StaffRole, StaffUser, Toll, TrackingSystem, Vehicle,
+    EventSource, StaffRole, StaffUser, Toll, Vehicle,
     VehicleClass, VehicleStatus,
 )
 
@@ -49,7 +49,7 @@ def check(name: str, condition: bool, detail: str = ""):
 
 
 def _sample_vehicle(**overrides) -> Vehicle:
-    defaults = dict(id=1, vin="1FADP3F20EL123456", vehicle_class=VehicleClass.SEDAN, status=VehicleStatus.OUT)
+    defaults = dict(id=1, vin="1FADP3F20EL123456", status=VehicleStatus.OUT)
     defaults.update(overrides)
     return Vehicle(**defaults)
 
@@ -184,7 +184,7 @@ def test_create_vehicle():
          patch("app.api.repo.create_vehicle", return_value=_sample_vehicle(status=VehicleStatus.AVAILABLE)):
         r = client.post(
             "/vehicles",
-            json={"vin": "1FADP3F20EL123456", "actor": "jed", "vehicle_class": "sedan", "status": "available"},
+            json={"vin": "1FADP3F20EL123456", "actor": "jed", "status": "available"},
         )
     check("test_create_vehicle_status", r.status_code == 200, r.text)
     check("test_create_vehicle_body", r.json()["vin"] == "1FADP3F20EL123456")
@@ -199,18 +199,6 @@ def test_create_vehicle_duplicate_vin_returns_409():
 def test_create_vehicle_bad_status_returns_400():
     r = client.post("/vehicles", json={"vin": "SOMEVIN", "actor": "jed", "status": "not_a_status"})
     check("test_create_vehicle_bad_status_returns_400", r.status_code == 400, r.text)
-
-
-def test_create_vehicle_bad_class_returns_400():
-    with patch("app.api.repo.get_vehicle_by_vin", return_value=None):
-        r = client.post("/vehicles", json={"vin": "SOMEVIN", "actor": "jed", "vehicle_class": "not_a_class"})
-    check("test_create_vehicle_bad_class_returns_400", r.status_code == 400, r.text)
-
-
-def test_create_vehicle_bad_tracking_system_returns_400():
-    with patch("app.api.repo.get_vehicle_by_vin", return_value=None):
-        r = client.post("/vehicles", json={"vin": "SOMEVIN", "actor": "jed", "tracking_system": "not_real"})
-    check("test_create_vehicle_bad_tracking_system_returns_400", r.status_code == 400, r.text)
 
 
 def test_get_vehicle_by_vin_found():
@@ -1265,8 +1253,7 @@ if __name__ == "__main__":
     tests = [
         test_health, test_fleet_out,
         test_create_vehicle, test_create_vehicle_duplicate_vin_returns_409,
-        test_create_vehicle_bad_status_returns_400, test_create_vehicle_bad_class_returns_400,
-        test_create_vehicle_bad_tracking_system_returns_400,
+        test_create_vehicle_bad_status_returns_400,
         test_get_vehicle_by_vin_found, test_get_vehicle_by_vin_not_found,
         test_get_vehicle_found, test_get_vehicle_not_found,
         test_update_vehicle_position, test_update_vehicle_position_not_found_returns_404,

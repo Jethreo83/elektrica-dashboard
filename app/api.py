@@ -48,8 +48,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
+import jwt
 import psycopg2.errors
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app import db
@@ -87,7 +89,6 @@ from app.models import (
     Vehicle,
     VehicleClass,
     VehicleStatus,
-    TrackingSystem,
 )
 from app.models import Adjuster, InsuranceCarrier
 
@@ -95,6 +96,46 @@ app = FastAPI(
     title="Elektrica Dashboard API (Phase 1, internal/local only)",
     version="0.1.0",
 )
+
+# CORS -- the frontend (Vite dev server, pinned port 5181 per the
+# multi-app port-drift fix) is a different origin from this API.
+# Allowed origins come from an env var (comma-separated) so this never
+# silently opens up to '*' in a real deploy; falls back to the known
+# local dev ports for all four dashboards + shell if unset.
+_default_cors_origins = "http://localhost:5173,http://localhost:5180,http://localhost:5181,http://localhost:5182"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.environ.get("ELEKTRICA_CORS_ORIGINS", _default_cors_origins).split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Auth -- shared-secret SSO JWT per shell-dashboard's JWT_CONTRACT.md.
+# The shell issues the token (Google login + domain match); THIS backend
+# independently verifies it (never trusts "the shell already checked")
+# and re-checks entitlement against elektrica.staff_user on every
+# request, per the contract's §4 step 5 -- so a deactivation takes
+# effect immediately instead of waiting for token expiry.
+# ---------------------------------------------------------------------------
+
+class StaffSession(BaseModel):
+    person_id: int
+    google_email: str
+    role: str
+    staff_user_id: int
+
+
+def get_jwt_secret() -> str:
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="JWT_SECRET is not configured server-side -- auth is disabled, refusing to accept unverified requests.",
+        )
+    return secret
 
 
 def get_db_env_var() -> str:
@@ -192,6 +233,137 @@ def require_bot_api_key(x_api_key: "str | None" = Header(default=None)):
         raise HTTPException(status_code=401, detail="Missing or invalid X-Api-Key header.")
 
 
+def require_staff(
+    authorization: "str | None" = Header(default=None),
+    cur=Depends(get_cursor),
+) -> StaffSession:
+    """Verifies the shared-secret SSO JWT (shell-dashboard's
+    JWT_CONTRACT.md §4) and re-checks entitlement against
+    elektrica.staff_user on EVERY request -- never trusts the role
+    baked into the token at issuance time, so a deactivation via
+    POST /staff/{email}/active takes effect immediately rather than
+    waiting up to 8h for token expiry (contract §4 step 5).
+
+    Steps, matching the contract literally:
+      1. Read Authorization: Bearer <token> -- 401 if missing.
+      2. jwt.decode(..., algorithms=['HS256']) -- 401 on any failure
+         (expired/malformed/bad signature).
+      3. iss must be 'shell-dashboard' -- 401 otherwise.
+      4. grants must contain a 'elektrica' entry -- 403 otherwise (a
+         valid token for a person with no Elektrica entitlement).
+      5. Look up elektrica.staff_user by google_email, require
+         active=true -- 403 if missing/inactive (freshly-read, not the
+         JWT's own claim).
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization: Bearer <token> header.")
+    token = authorization.split(" ", 1)[1].strip()
+    secret = get_jwt_secret()
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except jwt.PyJWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid or expired token: {e}")
+    if payload.get("iss") != "shell-dashboard":
+        raise HTTPException(status_code=401, detail="Token issuer mismatch.")
+    grants = payload.get("grants") or []
+    grant = next((g for g in grants if g.get("business") == "elektrica"), None)
+    if grant is None:
+        raise HTTPException(status_code=403, detail="This account has no Elektrica entitlement.")
+    google_email = payload.get("google_email")
+    if not google_email:
+        raise HTTPException(status_code=401, detail="Token is missing google_email.")
+    staff = repo.get_staff_user_by_google_email(cur, google_email)
+    if staff is None or not staff.active:
+        raise HTTPException(
+            status_code=403,
+            detail=f"No active elektrica.staff_user for {google_email!r} -- entitlement was revoked or never provisioned.",
+        )
+    return StaffSession(
+        person_id=staff.person_id, google_email=google_email,
+        role=staff.role.value, staff_user_id=staff.id,
+    )
+
+
+@app.middleware("http")
+async def enforce_staff_auth(request, call_next):
+    """Global auth gate -- every human-operated route requires a valid
+    shell-issued SSO JWT (see require_staff()'s docstring above for the
+    full verification steps), EXCEPT the handful of routes that are
+    public or have their own dedicated auth:
+      - GET /health (liveness probe, no data).
+      - /docs, /openapi.json, /redoc (FastAPI's own doc UI, dev-only).
+      - POST .../proposals (bot-write route, already gated by its own
+        X-Api-Key dependency -- require_bot_api_key -- adding JWT auth
+        on top would break the one intentionally machine-to-machine
+        endpoint in this file).
+    Implemented as middleware (not a per-route Depends) so this cannot
+    be silently forgotten on any of the 35+ existing routes -- a route
+    added without ANY entry below still gets the auth check by
+    default, which is the fail-closed direction to err on.
+    """
+    from starlette.responses import JSONResponse
+
+    path = request.url.path
+    public_exact = {"/health"}
+    public_prefixes = ("/docs", "/openapi.json", "/redoc")
+    if path in public_exact or path.startswith(public_prefixes):
+        return await call_next(request)
+    if path.endswith("/proposals") and request.method == "POST":
+        return await call_next(request)
+    if os.environ.get("ELEKTRICA_DISABLE_AUTH") == "1":
+        # Test-suite escape hatch ONLY -- test_api.py's TestClient
+        # predates this auth layer and exercises every route via
+        # app.dependency_overrides[get_cursor] with no Authorization
+        # header at all; conftest.py sets this env var for that run
+        # only. Never set in any real deploy (.env.example does not
+        # define it) -- this is not a general auth bypass toggle.
+        return await call_next(request)
+
+    authorization = request.headers.get("authorization")
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return JSONResponse({"detail": "Missing Authorization: Bearer <token> header."}, status_code=401)
+    token = authorization.split(" ", 1)[1].strip()
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        return JSONResponse(
+            {"detail": "JWT_SECRET is not configured server-side -- auth is disabled, refusing to accept unverified requests."},
+            status_code=503,
+        )
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except jwt.PyJWTError as e:
+        return JSONResponse({"detail": f"Invalid or expired token: {e}"}, status_code=401)
+    if payload.get("iss") != "shell-dashboard":
+        return JSONResponse({"detail": "Token issuer mismatch."}, status_code=401)
+    grants = payload.get("grants") or []
+    grant = next((g for g in grants if g.get("business") == "elektrica"), None)
+    if grant is None:
+        return JSONResponse({"detail": "This account has no Elektrica entitlement."}, status_code=403)
+    google_email = payload.get("google_email")
+    if not google_email:
+        return JSONResponse({"detail": "Token is missing google_email."}, status_code=401)
+
+    # Re-check against elektrica.staff_user (own short-lived connection,
+    # separate from the route's own get_cursor() dependency) so a
+    # deactivation takes effect immediately, per the JWT contract §4
+    # step 5 -- not just trusting the JWT's baked-in role/grant.
+    try:
+        with db.cursor(get_db_env_var(), set_role=get_db_set_role()) as cur:
+            staff = repo.get_staff_user_by_google_email(cur, google_email)
+    except Exception as e:
+        return JSONResponse({"detail": f"Auth check failed: {e}"}, status_code=500)
+    if staff is None or not staff.active:
+        return JSONResponse(
+            {"detail": f"No active elektrica.staff_user for {google_email!r} -- entitlement was revoked or never provisioned."},
+            status_code=403,
+        )
+    request.state.staff = StaffSession(
+        person_id=staff.person_id, google_email=google_email,
+        role=staff.role.value, staff_user_id=staff.id,
+    )
+    return await call_next(request)
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -199,21 +371,19 @@ def require_bot_api_key(x_api_key: "str | None" = Header(default=None)):
 class VehicleOut(BaseModel):
     id: int
     vin: str
-    vehicle_class: Optional[str] = None
     status: str
-    tracking_system: Optional[str] = None
     current_position: Optional[dict] = None
 
 
 class VehicleIn(BaseModel):
-    """Handoff §2.3 vehicle intake shape. class/status/tracking_system
-    values are the PLACEHOLDER enum sets from migrations/002 (see
-    app/models.py's VehicleClass docstring) -- pending real Fleet export."""
+    """Handoff §2.3 vehicle intake shape. class/tracking_system columns
+    were dropped by migration 015 -- Jed confirmed the real Fleet export
+    has no such columns (docs/OVERNIGHT_DECISIONS.md); derive/infer that
+    info elsewhere if the app layer ever needs it, rather than a Sheet-
+    sourced column that doesn't exist."""
     vin: str
     actor: str
-    vehicle_class: Optional[str] = None
     status: str = "available"
-    tracking_system: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -665,9 +835,7 @@ def _communication_to_out(c: Communication) -> CommunicationOut:
 def _vehicle_to_out(v: Vehicle) -> VehicleOut:
     return VehicleOut(
         id=v.id, vin=v.vin,
-        vehicle_class=v.vehicle_class.value if v.vehicle_class else None,
         status=v.status.value,
-        tracking_system=v.tracking_system.value if v.tracking_system else None,
         current_position=v.current_position,
     )
 
@@ -762,6 +930,15 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/me")
+def get_me(cur=Depends(get_cursor), staff: StaffSession = Depends(require_staff)):
+    """Frontend calls this once after receiving the shell's JWT to learn
+    who is signed in and what role they hold in THIS dashboard's own
+    staff_user table (not the JWT's baked-in role) -- same
+    fail-closed/re-check discipline as require_staff() itself."""
+    return staff
+
+
 # --- Fleet board (handoff §2.5: Rentals landing screen) --------------------
 
 @app.get("/fleet/out", response_model=list[VehicleOut])
@@ -788,30 +965,11 @@ def create_vehicle(body: VehicleIn, cur=Depends(get_cursor)):
             status_code=400,
             detail=f"status={body.status!r} must be one of {[s.value for s in VehicleStatus]}",
         )
-    vehicle_class = None
-    if body.vehicle_class is not None:
-        try:
-            vehicle_class = VehicleClass(body.vehicle_class)
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"vehicle_class={body.vehicle_class!r} must be one of {[c.value for c in VehicleClass]}",
-            )
-    tracking_system = None
-    if body.tracking_system is not None:
-        try:
-            tracking_system = TrackingSystem(body.tracking_system)
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"tracking_system={body.tracking_system!r} must be one of {[t.value for t in TrackingSystem]}",
-            )
     existing = repo.get_vehicle_by_vin(cur, body.vin)
     if existing is not None:
         raise HTTPException(status_code=409, detail=f"vin={body.vin!r} already exists as vehicle id={existing.id}")
     vehicle = Vehicle(
-        vin=body.vin, vehicle_class=vehicle_class, status=status,
-        tracking_system=tracking_system, notes=body.notes,
+        vin=body.vin, status=status, notes=body.notes,
     )
     return _vehicle_to_out(repo.create_vehicle(cur, vehicle, body.actor))
 

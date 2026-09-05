@@ -58,7 +58,6 @@ from app.models import (
     StaffRole,
     StaffUser,
     Toll,
-    TrackingSystem,
     Vehicle,
     VehicleClass,
     VehicleStatus,
@@ -230,15 +229,13 @@ def create_vehicle(cur, vehicle: Vehicle, actor: str) -> Vehicle:
     cur.execute(
         """
         INSERT INTO elektrica.vehicle (
-            vin, class, status, tracking_system, notes, created_by, updated_by
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            vin, status, notes, created_by, updated_by
+        ) VALUES (%s, %s, %s, %s, %s)
         RETURNING *
         """,
         (
             vehicle.vin,
-            vehicle.vehicle_class.value if vehicle.vehicle_class else None,
             vehicle.status.value,
-            vehicle.tracking_system.value if vehicle.tracking_system else None,
             vehicle.notes, actor, actor,
         ),
     )
@@ -273,9 +270,7 @@ def update_vehicle_position(cur, vehicle_id: int, position: dict, actor: str) ->
 def _vehicle_from_row(row) -> Vehicle:
     return Vehicle(
         id=row["id"], vin=row["vin"],
-        vehicle_class=VehicleClass(row["class"]) if row["class"] else None,
         status=VehicleStatus(row["status"]),
-        tracking_system=TrackingSystem(row["tracking_system"]) if row["tracking_system"] else None,
         current_position=row["current_position"],
         position_updated_at=row["position_updated_at"],
         notes=row["notes"],

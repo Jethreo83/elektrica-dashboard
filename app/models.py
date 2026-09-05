@@ -12,12 +12,15 @@ labels exactly, dataclasses with id/created_at/created_by trailing
 fields, __post_init__ validation mirroring DB-level CHECK constraints
 so bad data is rejected before it ever reaches a query.
 
-SCOPE NOTE: elektrica.vehicle's class/status/tracking_system enums
-(migration 002) carry PLACEHOLDER values pending the real Fleet export
--- see docs/OVERNIGHT_DECISIONS.md. This module mirrors those enums
-as-is (same placeholder caveat), does not invent new values, and will
-need a one-line VehicleClass/TrackingSystem update when the export
-lands and migration 002 is corrected.
+SCOPE NOTE: elektrica.vehicle's class/tracking_system columns were
+dropped by migration 015, per Jed's confirmed answer that the real Fleet
+sheet export has no such columns -- see docs/OVERNIGHT_DECISIONS.md's
+"Real Fleet / Rental Management Sheet exports landed" entry. VehicleClass
+(the enum) stays, since it's still used by ComparableSet.vehicle_class
+(a market-rate classification independent of any per-vehicle Fleet
+record, per handoff §2.8) -- only the Vehicle dataclass's own
+vehicle_class/tracking_system fields and the TrackingSystem enum itself
+are removed here.
 """
 from __future__ import annotations
 
@@ -33,8 +36,12 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 class VehicleClass(str, Enum):
-    """Matches elektrica.vehicle_class (migrations/002). PLACEHOLDER
-    value set pending real Fleet export -- see docs/OVERNIGHT_DECISIONS.md."""
+    """Matches elektrica.vehicle_class (migration 002, still in use by
+    ComparableSet.vehicle_class -- see migration 015's header comment).
+    Values remain PLACEHOLDER pending a real market-rate-classification
+    source; unlike the Vehicle.vehicle_class field this enum backed
+    (removed by migration 015), this usage was never claimed to be
+    Fleet-sheet-sourced in the first place."""
     EV = "ev"
     GAS = "gas"
     SUV = "suv"
@@ -50,15 +57,6 @@ class VehicleStatus(str, Enum):
     OUT = "out"
     MAINTENANCE = "maintenance"
     RETIRED = "retired"
-
-
-class TrackingSystem(str, Enum):
-    """Matches elektrica.tracking_system (migrations/002). PLACEHOLDER
-    value set, taken verbatim from handoff §2.3's parenthetical."""
-    BOUNCIE = "bouncie"
-    STANDARD_FLEET = "standard_fleet"
-    GEOFENCE_EMAIL = "geofence_email"
-    NONE = "none"
 
 
 class RentalState(str, Enum):
@@ -201,13 +199,14 @@ class Renter:
 
 @dataclass
 class Vehicle:
-    """Mirrors elektrica.vehicle (migrations/002). class/status/
-    tracking_system enum VALUES are placeholder -- see VehicleClass
-    docstring above."""
+    """Mirrors elektrica.vehicle (migration 002, class/tracking_system
+    columns dropped by migration 015 -- see that migration's header
+    comment: the real Fleet export has no such columns; derive/infer
+    equivalent info elsewhere if the app layer ever needs it, per Jed's
+    direct instruction, rather than re-adding a column sourced from a
+    Sheet field that doesn't exist)."""
     vin: str
-    vehicle_class: Optional[VehicleClass] = None
     status: VehicleStatus = VehicleStatus.AVAILABLE
-    tracking_system: Optional[TrackingSystem] = None
     current_position: Optional[dict] = None
     position_updated_at: Optional[datetime] = None
     notes: Optional[str] = None
