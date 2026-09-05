@@ -530,6 +530,23 @@ def test_create_demand_mismatched_adjuster_carrier_returns_400():
     check("test_create_demand_mismatched_adjuster_carrier_returns_400", r.status_code == 400, r.text)
 
 
+def test_get_rental_demands():
+    """docs/BUILD_LOG.md migration-014 cycle's flagged next item: a plain
+    gap where a rental's demand chain couldn't be listed, only created
+    one-by-one. Same shape as list_rental_events/list_tolls_for_rental."""
+    with patch("app.api.repo.get_rental", return_value=_sample_rental()), \
+         patch("app.api.repo.list_demands_for_rental", return_value=[_sample_demand(id=1), _sample_demand(id=2)]):
+        r = client.get("/rentals/1/demands")
+    check("test_get_rental_demands_status", r.status_code == 200, r.text)
+    check("test_get_rental_demands_body", len(r.json()) == 2 and r.json()[0]["id"] == 1)
+
+
+def test_get_rental_demands_rental_not_found():
+    with patch("app.api.repo.get_rental", return_value=None):
+        r = client.get("/rentals/999/demands")
+    check("test_get_rental_demands_rental_not_found", r.status_code == 404, r.text)
+
+
 def test_mark_demand_sent():
     from app.models import DemandStatus
     sent = _sample_demand(status=DemandStatus.SENT, sent_via="fax")
@@ -1135,6 +1152,9 @@ if __name__ == "__main__":
         test_create_proposal_missing_header_returns_401, test_create_proposal_wrong_key_returns_401,
         test_get_pending_proposals, test_decide_proposal_accept, test_decide_proposal_bad_status,
         test_create_demand, test_create_demand_carrier_without_name_returns_400,
+        test_create_demand_unknown_carrier_id_returns_400,
+        test_create_demand_mismatched_adjuster_carrier_returns_400,
+        test_get_rental_demands, test_get_rental_demands_rental_not_found,
         test_mark_demand_sent, test_get_aging_demands,
         test_create_comparable_set, test_create_comparable_set_demand_not_found,
         test_create_comparable_set_bad_date_range_returns_400,

@@ -956,6 +956,18 @@ def create_demand(rental_id: int, body: DemandIn, cur=Depends(get_cursor)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/rentals/{rental_id}/demands", response_model=list[DemandOut])
+def get_rental_demands(rental_id: int, cur=Depends(get_cursor)):
+    """Dashboard gap flagged in docs/BUILD_LOG.md's migration-014 cycle:
+    there was previously no way to list a rental's demands, only create
+    one and mark it sent. Returns every demand row for this rental
+    (oldest first), including any prior_demand_id chain -- same
+    no-status-filter convention as list_rental_events/list_tolls_for_rental."""
+    if repo.get_rental(cur, rental_id) is None:
+        raise HTTPException(status_code=404, detail=f"No rental with id={rental_id}")
+    return [_demand_to_out(d) for d in repo.list_demands_for_rental(cur, rental_id)]
+
+
 @app.post("/demands/{demand_id}/mark-sent", response_model=DemandOut)
 def mark_demand_sent(demand_id: int, body: MarkSentRequest, cur=Depends(get_cursor)):
     try:

@@ -1584,13 +1584,55 @@ every dependent migration in this repo. No auth/session layer on any
 route; frontend not started; migration 007's `vls.case` grant-scope flag
 for Jed still open (staging-only, not urgent).
 
-**Next up:** with carrier/adjuster now properly FK-wired, the natural
-next buildable items are (a) a `GET /rentals/{id}/demands` list route --
-currently there's no way to list a rental's demands, only create one and
-mark it sent, a real gap for the dashboard's own use, not carried over
-from any handoff placeholder; (b) the renter-provisioning JotForm intake
-flow (handoff §2.2) that `docs/BACKLOG.md` already flags needs
-`platform.match_or_create_person()`, not bespoke matching logic; (c)
-frontend, still fully unstarted. Logging (a) as the most concrete
-next item since it's a plain gap in an otherwise-complete route family.
+**Next up (as of prior cycle):** with carrier/adjuster now properly
+FK-wired, the natural next buildable items were (a) a
+`GET /rentals/{id}/demands` list route; (b) the renter-provisioning
+JotForm intake flow (handoff §2.2, needs
+`platform.match_or_create_person()`); (c) frontend, still fully
+unstarted. Item (a) closed this cycle -- see entry below.
+
+## 2026-09-05 (cron cycle, later) -- `GET /rentals/{id}/demands` list route
+
+Closed the concrete "next up" item (a) from the previous entry: no
+schema change needed, pure app-layer gap.
+
+- **`app/repository.py`**: new `list_demands_for_rental(cur, rental_id)`
+  -- `SELECT * FROM elektrica.demand WHERE rental_id = %s ORDER BY
+  created_at`, same shape/ordering convention as
+  `list_tolls_for_rental`/`list_rental_events`. No status filter (draft
+  and sent both belong in this view, same as every other `list_*` in
+  this repo -- no query-param filtering exists anywhere yet).
+- **`app/api.py`**: new `GET /rentals/{rental_id}/demands` ->
+  `list[DemandOut]`, mirrors `get_rental_events`'s 404-if-rental-missing
+  shape exactly.
+- **`test_api.py`**: 2 new cases (`test_get_rental_demands`,
+  `test_get_rental_demands_rental_not_found`), registered in the
+  file's manual `__main__` test list. **Also fixed a real gap found
+  while doing this**: the manual test list was missing
+  `test_create_demand_unknown_carrier_id_returns_400` and
+  `test_create_demand_mismatched_adjuster_carrier_returns_400` from the
+  migration-014 cycle -- they existed and were pytest-collected fine,
+  but `python test_api.py` (the manual runner) was silently skipping
+  both. Added both to the list. 142/142 pytest, 115/115 manual runner
+  (up from 140/140 and 113 actually run despite claiming otherwise).
+- **Live-verified against real staging** (uvicorn port 8612,
+  `neondb_owner` DSN passed inline per this repo's Windows env-var
+  convention): `GET /rentals/1/demands` -> 200, 2 rows (ids 1, 11) in
+  correct created_at order; `GET /rentals/8/demands` -> 200, 2 rows
+  (ids 6, 10, one carrier-recipient draft + one renter-recipient
+  draft, both correctly typed); `GET /rentals/999999/demands` -> 404.
+  Server killed after, `netstat`-confirmed no LISTENING socket left on
+  8612. Scratch DSN file deleted immediately after use.
+
+**Not done / explicitly deferred (unchanged):** `insurer_payment`
+import still export-blocked; migrations 006/013/014 (and this cycle's
+app-layer change riding on top of them) remain staging-only pending
+Jed's review; no auth/session layer on any route; frontend not started;
+migration 007's `vls.case` grant-scope flag for Jed still open.
+
+**Next up:** (b) the renter-provisioning JotForm intake flow (handoff
+§2.2) is now the most concrete remaining backend item -- needs
+`platform.match_or_create_person()` per `docs/BACKLOG.md`'s existing
+entries, not bespoke matching logic. Frontend (c) remains fully
+unstarted and is the other open front.
 

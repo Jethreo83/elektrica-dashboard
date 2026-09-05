@@ -467,6 +467,22 @@ def get_demand(cur, demand_id: int) -> Optional[Demand]:
     return _demand_from_row(row) if row else None
 
 
+def list_demands_for_rental(cur, rental_id: int) -> list[Demand]:
+    """Handoff §2.4/§2.8 dashboard gap: list every demand generated for a
+    given rental (a demand chain can have several rows via
+    prior_demand_id -- this returns all of them, oldest first, same
+    ordering convention as list_tolls_for_rental/list_rental_events).
+    No status filter -- draft and sent demands both belong in this view;
+    callers needing only one status filter client-side same as every
+    other list_* route in this repo (no query-param filtering exists
+    anywhere yet)."""
+    cur.execute(
+        "SELECT * FROM elektrica.demand WHERE rental_id = %s ORDER BY created_at",
+        (rental_id,),
+    )
+    return [_demand_from_row(r) for r in cur.fetchall()]
+
+
 def mark_demand_sent(cur, demand_id: int, sent_via: str, actor: str) -> Demand:
     cur.execute(
         """
