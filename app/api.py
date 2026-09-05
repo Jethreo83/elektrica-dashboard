@@ -88,6 +88,7 @@ from app.models import (
     VehicleStatus,
     TrackingSystem,
 )
+from app.models import Adjuster, InsuranceCarrier
 
 app = FastAPI(
     title="Elektrica Dashboard API (Phase 1, internal/local only)",
@@ -1345,4 +1346,172 @@ def reject_communication(communication_id: int, body: CommunicationDecisionReque
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return _communication_to_out(comm)
+
+
+# --- Insurance carrier + adjuster (platform.*, migrations/013, handoff §1.4/§2.8) ---
+#
+# NOT the historical insurer_payment import (handoff §2.9) -- that stays
+# export-blocked (docs/OVERNIGHT_DECISIONS.md's open BLOCKER entry,
+# unchanged). This is the carrier/adjuster schema+routes only, which the
+# handoff describes in full literal detail independent of any Sheet
+# export -- see migrations/013's own header comment for the full
+# distinction. No DELETE route exists or is planned: elektrica_app has
+# no DELETE grant on either table (migration 013), by design -- records
+# get corrected, not removed.
+
+class InsuranceCarrierIn(BaseModel):
+    name: str
+    actor: str
+    aliases: list[str] = []
+    fax: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    claims_mailing_address: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class InsuranceCarrierOut(BaseModel):
+    id: int
+    name: str
+    aliases: list[str]
+    fax: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    claims_mailing_address: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class InsuranceCarrierAliasIn(BaseModel):
+    alias: str
+    actor: str
+
+
+class AdjusterIn(BaseModel):
+    name: str
+    actor: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class AdjusterOut(BaseModel):
+    id: int
+    carrier_id: int
+    name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+def _insurance_carrier_to_out(c: InsuranceCarrier) -> InsuranceCarrierOut:
+    return InsuranceCarrierOut(
+        id=c.id, name=c.name, aliases=c.aliases, fax=c.fax, email=c.email, phone=c.phone,
+        claims_mailing_address=c.claims_mailing_address, notes=c.notes,
+    )
+
+
+def _adjuster_to_out(a: Adjuster) -> AdjusterOut:
+    return AdjusterOut(id=a.id, carrier_id=a.carrier_id, name=a.name, phone=a.phone, email=a.email, notes=a.notes)
+
+
+@app.post("/insurance-carriers", response_model=InsuranceCarrierOut)
+def create_insurance_carrier(body: InsuranceCarrierIn, cur=Depends(get_cursor)):
+    """`name` is UNIQUE at the DB level (insurance_carrier_name_unique,
+    migrations/013) -- the "collapse to canonical record" mechanism
+    handoff §2.9.2 describes. A variant spelling of an existing carrier
+    should go through POST /insurance-carriers/{id}/aliases instead of a
+    second create call; this route surfaces the duplicate as 409, not
+    500, same discipline as every other unique-constraint route in this
+    file (vehicle VIN, document-template family+version)."""
+    try:
+        carrier = InsuranceCarrier(
+            name=body.name, aliases=body.aliases, fax=body.fax, email=body.email,
+            phone=body.phone, claims_mailing_address=body.claims_mailing_address, notes=body.notes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        return _insurance_carrier_to_out(repo.create_insurance_carrier(cur, carrier, body.actor))
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An insurance_carrier named {body.name!r} already exists -- "
+                   f"add an alias instead of creating a duplicate.",
+        )
+
+
+@app.get("/insurance-carriers", response_model=list[InsuranceCarrierOut])
+def list_insurance_carriers(cur=Depends(get_cursor)):
+    return [_insurance_carrier_to_out(c) for c in repo.list_insurance_carriers(cur)]
+
+
+@app.get("/insurance-carriers/find")
+def find_insurance_carrier(name: str, cur=Depends(get_cursor)):
+    """Query-param lookup by canonical name OR alias (case-insensitive) --
+    same query-param-not-path-segment discipline as GET /communications,
+    to avoid a wildcard-shaped path colliding with /insurance-carriers/{id}
+    below. Returns null (not 404) when nothing matches, since "no such
+    carrier yet" is an expected, non-error outcome for a caller deciding
+    whether to create one."""
+    carrier = repo.find_insurance_carrier_by_name_or_alias(cur, name)
+    return _insurance_carrier_to_out(carrier) if carrier else None
+
+
+@app.get("/insurance-carriers/{carrier_id}", response_model=InsuranceCarrierOut)
+def get_insurance_carrier(carrier_id: int, cur=Depends(get_cursor)):
+    carrier = repo.get_insurance_carrier(cur, carrier_id)
+    if carrier is None:
+        raise HTTPException(status_code=404, detail=f"No insurance_carrier with id={carrier_id}")
+    return _insurance_carrier_to_out(carrier)
+
+
+@app.post("/insurance-carriers/{carrier_id}/aliases", response_model=InsuranceCarrierOut)
+def add_insurance_carrier_alias(carrier_id: int, body: InsuranceCarrierAliasIn, cur=Depends(get_cursor)):
+    try:
+        return _insurance_carrier_to_out(
+            repo.add_insurance_carrier_alias(cur, carrier_id, body.alias, body.actor)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/insurance-carriers/{carrier_id}/adjusters", response_model=AdjusterOut)
+def create_adjuster(carrier_id: int, body: AdjusterIn, cur=Depends(get_cursor)):
+    """404 if the carrier doesn't exist (checked here, not left to the
+    FK -- same pre-check-then-insert shape as vehicle-scoped
+    compliance-item creation) rather than surfacing a raw
+    ForeignKeyViolation as a 400 that would read confusingly generic for
+    this specific, checkable case."""
+    if repo.get_insurance_carrier(cur, carrier_id) is None:
+        raise HTTPException(status_code=404, detail=f"No insurance_carrier with id={carrier_id}")
+    try:
+        adjuster = Adjuster(carrier_id=carrier_id, name=body.name, phone=body.phone, email=body.email, notes=body.notes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        return _adjuster_to_out(repo.create_adjuster(cur, adjuster, body.actor))
+    except psycopg2.errors.UniqueViolation:
+        # adjuster_name_unique_per_carrier (migrations/013) -- same name
+        # already exists at THIS carrier. A different carrier is fine
+        # (people move employers) -- only the (carrier_id, name) pair is
+        # unique, so this is a real duplicate, not a false positive.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Adjuster {body.name!r} already exists at carrier {carrier_id}.",
+        )
+
+
+@app.get("/insurance-carriers/{carrier_id}/adjusters", response_model=list[AdjusterOut])
+def list_adjusters_for_carrier(carrier_id: int, cur=Depends(get_cursor)):
+    if repo.get_insurance_carrier(cur, carrier_id) is None:
+        raise HTTPException(status_code=404, detail=f"No insurance_carrier with id={carrier_id}")
+    return [_adjuster_to_out(a) for a in repo.list_adjusters_for_carrier(cur, carrier_id)]
+
+
+@app.get("/adjusters/{adjuster_id}", response_model=AdjusterOut)
+def get_adjuster(adjuster_id: int, cur=Depends(get_cursor)):
+    adjuster = repo.get_adjuster(cur, adjuster_id)
+    if adjuster is None:
+        raise HTTPException(status_code=404, detail=f"No adjuster with id={adjuster_id}")
+    return _adjuster_to_out(adjuster)
 

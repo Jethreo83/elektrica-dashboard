@@ -1324,3 +1324,148 @@ cycle to double check nothing new slipped in, then likely time to start
 looking at frontend scaffolding (ADR-001 v2 §6/§9 places it last, but the
 backend build-order queue is now thin) or revisit the
 `insurer_payment`/`adjuster` export-block question with Jed.
+
+## 2026-09-05 (continuous cron cycle) — platform.insurance_carrier + platform.adjuster (migration 013), staging-only, full app-layer + routes
+
+**Starting point:** clean tree, fetched origin/main first (matched local
+HEAD at 371fbe3, no concurrent-session drift). Ran the full pytest suite
+first (122/122 passed) before touching anything, per standing practice.
+
+**Re-read the handoff/ADR to find the next real gap, not just repeat the
+prior cycle's "route-coverage sweep" pattern:** confirmed via a fresh pass
+over `app/repository.py` vs `app/api.py` that every non-private repository
+function already has HTTP coverage (prior cycle's own "worth a fresh full
+pass" note) -- so this cycle needed a genuinely new schema/app item, not
+another routing gap.
+
+**Found and closed a real, previously-unbuilt gap:** `insurer_payment`/
+`adjuster` (handoff §2.8, ADR-001 v2 build order step 8) has been flagged
+"export-blocked" since 2026-09-03, but re-reading the handoff closely
+distinguishes two separate things that had been getting bundled together
+under one BLOCKER label:
+  1. The historical insurer-payment *rows* (handoff §2.9's import) --
+     genuinely still blocked on Kay's Elektrica Google OAuth restoration,
+     no ETA, unchanged.
+  2. The `insurance_carrier`/`adjuster` *schema* itself (handoff §1.4/§2.8)
+     -- NOT blocked by that export. Jed already confirmed (ADR-001 v2
+     §2) that "a real insurance contact list exists (fax, phone, address,
+     email)" as seed data for exactly this table, and the handoff gives
+     the carrier/adjuster field list verbatim, independent of any Sheet.
+     Only the historical *backfill* of `insurer_payment` needs the export;
+     the carrier/adjuster *shape* does not.
+
+Built item (2), staying honest that item (1) remains genuinely blocked:
+
+- **`migrations/013_platform_insurance_carrier.sql`** (staging-only, new
+  migration): `platform.insurance_carrier` (name UNIQUE + `aliases TEXT[]`
+  -- the literal "collapse to canonical record" mechanism handoff §2.9.2
+  describes for the eventual historical import) and `platform.adjuster`
+  (carrier_id FK, name UNIQUE per carrier -- same adjuster name can recur
+  at a DIFFERENT carrier, people move employers). Placed in `platform.*`
+  from day one (not `elektrica.*` "for now") per SHARED_CONVENTIONS
+  convention #2 and handoff §1.4's explicit "Shared between VLS and
+  Elektrica Rentals" -- migrations 009/010 already paid for this lesson
+  once each; not repeating it a third time. `elektrica_app` gets
+  SELECT/INSERT/UPDATE, deliberately no DELETE (carrier/adjuster records
+  get corrected, never removed) -- `vls_app` is NOT granted (no real VLS
+  caller yet, same "grant when needed" discipline as every other
+  cross-schema grant in this repo).
+- **`scripts/verify_013.sql`**: 7 checks -- insert + aliases round-trip,
+  duplicate canonical name rejected, bad adjuster carrier_id FK rejected,
+  same adjuster name allowed at a different carrier, duplicate adjuster
+  name at the SAME carrier rejected, `updated_at` trigger fires, and
+  `elektrica_app` grant shape confirmed (SELECT/INSERT/UPDATE yes, DELETE
+  no) via `has_table_privilege()`. All 7 passed against real staging
+  Postgres (`neondb_owner`).
+- **App layer** (`app/models.py`, `app/repository.py`, `app/api.py`):
+  `InsuranceCarrier`/`Adjuster` dataclasses; repository CRUD
+  (`create_insurance_carrier`, `get_insurance_carrier`,
+  `find_insurance_carrier_by_name_or_alias` -- case-insensitive lookup
+  against name OR any alias, `list_insurance_carriers`,
+  `add_insurance_carrier_alias`, `create_adjuster`, `get_adjuster`,
+  `list_adjusters_for_carrier`); HTTP routes (`POST`/`GET
+  /insurance-carriers`, `GET /insurance-carriers/find` (query-param, not a
+  path segment -- same wildcard-collision avoidance as `GET
+  /communications`), `GET /insurance-carriers/{id}`, `POST
+  /insurance-carriers/{id}/aliases`, `POST`/`GET
+  /insurance-carriers/{id}/adjusters`, `GET /adjusters/{id}`). No DELETE
+  route anywhere in this family, matching the DB grant.
+- 14 new `test_api.py` cases (111/111 direct run, 138/138 pytest):
+  create/duplicate-409, list, find-found/find-null-not-404,
+  get-found/get-404, add-alias/add-alias-404, create-adjuster/
+  carrier-404/duplicate-409, list-adjusters/list-404, get-adjuster-found/404.
+
+**Real bug found and fixed in the verify SCRIPT itself, not the app code
+(different class of bug than prior cycles' 500->4xx fixes, worth naming
+precisely):** `scripts/verify_013.sql`'s CHECK 6 (updated_at trigger fires
+on UPDATE) initially failed when run through a harness that submits an
+entire multi-statement `.sql` file as one `psycopg2.execute()` call under
+one implicit transaction -- Postgres's `now()` is fixed at transaction
+start, so a before/after `now()`-based comparison inside that one
+transaction always reads equal, producing a false failure that looks like
+a missing trigger but isn't one. Confirmed the trigger itself is correct
+by re-running the same check as its own separate statement/transaction
+(matches how `psql` -- not available in this environment -- actually runs
+a multi-statement script: one implicit transaction PER top-level
+statement, not one for the whole file). Documented the trap directly in
+the check's own SQL comment so a future session's harness choice doesn't
+silently reintroduce it. Not a schema or app-code bug; a test-harness
+transaction-boundary gotcha, logged as such rather than "fixed" by
+changing the trigger, which was never wrong.
+
+**Live-verified against real staging Postgres, real HTTP** (uvicorn,
+`neondb_owner` connection, ports 8511 then 8512 after resolving a
+stale-shell-environment-variable false alarm on 8511 -- the FIRST server
+process failed with `UndefinedTable: relation "platform.insurance_carrier"
+does not exist` even though a direct psycopg2 check in the same terminal
+session confirmed the table existed; root cause was the background
+server process not inheriting a freshly-exported `DATABASE_URL` from an
+earlier command in the same interactive shell, not a real app or schema
+bug -- fixed by passing the env var inline on the server's own launch
+command instead of relying on shell export propagation into a background
+process). Once running correctly: created a real carrier (Geico Insurance
+Company, id=13) -> duplicate create -> 409 -> found it by alias (`GEICO`)
+via `GET /insurance-carriers/find` -> confirmed a genuinely-missing name
+returns `null` with 200, not 404 (deliberate: "no such carrier yet" is not
+an error) -> got it by id -> confirmed a bad id returns 404 -> added a
+second alias -> created an adjuster (Bob Adjuster, id=17) under it ->
+confirmed a nonexistent carrier_id returns 404 -> confirmed a duplicate
+adjuster name at the SAME carrier returns 409 -> listed adjusters for the
+carrier -> got the adjuster by id -> confirmed a bad adjuster id returns
+404. Both server processes killed after their runs; `netstat` confirmed no
+LISTENING socket left on either port (8511's underlying python.exe PID
+required a second explicit `taskkill` beyond the uvicorn parent PID --
+noted for future cycles: verify by PID from `netstat`'s own output, not
+just the PID the launch command returned, since uvicorn's actual listener
+can be a different process than the one `terminal(background=true)`
+reports). All scratch files holding the staging connection string
+(temp helper scripts under `%TEMP%`) deleted immediately after use, same
+discipline as every other cycle.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every other smoke run in this repo): `platform.insurance_carrier`
+ids 4/7/10/12/13 (test_harness + Geico smoke rows), `platform.adjuster`
+ids up through 17.
+
+**Not done / explicitly deferred (unchanged):** the historical
+`insurer_payment` import itself (handoff §2.9) remains genuinely
+export-blocked -- this cycle's work does not change that, only removes
+the *schema* from the blocked list; no auth/session layer on any route;
+frontend not started; migration 007's `vls.case` grant-scope flag for Jed
+still open (staging-only, not urgent). Migration 013 has NOT been
+promoted to production -- new schema Jed hasn't reviewed yet, staying on
+staging per standing discipline (nothing promotes without his review),
+same posture as migration 010 (`platform.communication`) before its own
+review.
+
+**Next up:** `elektrica.demand.carrier_name`/`adjuster_name` (migrations/
+006) are still PLACEHOLDER free-text columns per that migration's own
+header comment ("no insurance_carrier/adjuster tables exist yet"). Now
+that they do, wiring `elektrica.demand` to reference
+`platform.insurance_carrier`/`platform.adjuster` by id instead of free
+text is the natural next step -- but that is a real schema change to an
+existing table with a CHECK constraint
+(`demand_carrier_name_required_for_carrier_recipient`) tying into it, so
+it deserves its own migration + careful review rather than folding into
+this cycle. Logged as the concrete next item rather than left implicit.
+

@@ -637,3 +637,66 @@ def validate_rental_transition(current: RentalState, target: RentalState) -> Non
             f"Invalid rental state transition: {current.value} -> {target.value}. "
             f"Valid next states: {[s.value for s in valid]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# InsuranceCarrier + Adjuster -- mirrors platform.insurance_carrier /
+# platform.adjuster (migrations/013). Handoff §1.4 ("Canonical carrier
+# record... Shared between VLS and Elektrica Rentals") / §2.8 ("adjuster:
+# carrier_id, name, contact, notes"). No PLACEHOLDER caveat on the SHAPE
+# of these two tables (unlike elektrica.vehicle's enums) -- the handoff
+# gives their field list verbatim; only the historical *rows* (handoff
+# §2.9's import) remain export-blocked, not this schema. See migrations/
+# 013's own header comment for the full distinction.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InsuranceCarrier:
+    """Mirrors platform.insurance_carrier (migrations/013). `name` is the
+    canonical carrier name -- unique at the DB level, the "collapse to
+    canonical record" mechanism from handoff §2.9.2. Variant names belong
+    in `aliases`, not a second row."""
+    name: str
+    aliases: list[str] = None  # type: ignore[assignment]
+    fax: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    claims_mailing_address: Optional[str] = None
+    notes: Optional[str] = None
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+    def __post_init__(self):
+        if self.aliases is None:
+            self.aliases = []
+        name = (self.name or "").strip()
+        if not name:
+            raise ValueError("InsuranceCarrier.name cannot be blank")
+        self.name = name
+
+
+@dataclass
+class Adjuster:
+    """Mirrors platform.adjuster (migrations/013). Unique per
+    (carrier_id, name) at the DB level -- the same adjuster name CAN
+    recur at a different carrier (people move employers); that's not a
+    duplicate."""
+    carrier_id: int
+    name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+    def __post_init__(self):
+        name = (self.name or "").strip()
+        if not name:
+            raise ValueError("Adjuster.name cannot be blank")
+        self.name = name

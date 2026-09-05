@@ -25,6 +25,7 @@ from typing import Optional
 import psycopg2.extras
 
 from app.models import (
+    Adjuster,
     ComplianceItem,
     ComplianceItemStatus,
     ComplianceItemType,
@@ -40,6 +41,7 @@ from app.models import (
     DocumentTemplate,
     DocumentTemplateFamily,
     EventSource,
+    InsuranceCarrier,
     OutboundChannel,
     OutboundLog,
     Payment,
@@ -934,4 +936,122 @@ def _communication_from_row(row) -> Communication:
         match_status=CommunicationMatchStatus(row["match_status"]), match_evidence=row["match_evidence"],
         matched_by=row["matched_by"], matched_at=row["matched_at"],
         created_at=row["created_at"], created_by=row["created_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# InsuranceCarrier + Adjuster -- platform.insurance_carrier /
+# platform.adjuster (migrations/013), handoff §1.4/§2.8. First app-layer
+# code for these tables; existed schema-only since this cron cycle. No
+# DELETE path exposed (migration 013's own grants omit DELETE by design
+# -- carrier/adjuster records get corrected, never removed).
+# ---------------------------------------------------------------------------
+
+def create_insurance_carrier(cur, carrier: InsuranceCarrier, actor: str) -> InsuranceCarrier:
+    cur.execute(
+        """
+        INSERT INTO platform.insurance_carrier
+            (name, aliases, fax, email, phone, claims_mailing_address, notes, created_by, updated_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (carrier.name, carrier.aliases, carrier.fax, carrier.email, carrier.phone,
+         carrier.claims_mailing_address, carrier.notes, actor, actor),
+    )
+    return _insurance_carrier_from_row(cur.fetchone())
+
+
+def get_insurance_carrier(cur, carrier_id: int) -> Optional[InsuranceCarrier]:
+    cur.execute("SELECT * FROM platform.insurance_carrier WHERE id = %s", (carrier_id,))
+    row = cur.fetchone()
+    return _insurance_carrier_from_row(row) if row else None
+
+
+def find_insurance_carrier_by_name_or_alias(cur, name: str) -> Optional[InsuranceCarrier]:
+    """Case-insensitive lookup against the canonical name OR any alias --
+    the actual "collapse to canonical record" mechanism handoff §2.9.2
+    describes for the eventual historical import (still export-blocked,
+    see docs/OVERNIGHT_DECISIONS.md), and also useful today for any
+    caller trying to avoid creating a duplicate carrier under a slightly
+    different name."""
+    cur.execute(
+        """
+        SELECT * FROM platform.insurance_carrier
+        WHERE lower(name) = lower(%s)
+           OR EXISTS (SELECT 1 FROM unnest(aliases) a WHERE lower(a) = lower(%s))
+        """,
+        (name, name),
+    )
+    row = cur.fetchone()
+    return _insurance_carrier_from_row(row) if row else None
+
+
+def list_insurance_carriers(cur) -> list[InsuranceCarrier]:
+    cur.execute("SELECT * FROM platform.insurance_carrier ORDER BY name")
+    return [_insurance_carrier_from_row(r) for r in cur.fetchall()]
+
+
+def add_insurance_carrier_alias(cur, carrier_id: int, alias: str, actor: str) -> InsuranceCarrier:
+    """Appends an alias if not already present (case-insensitive dedupe
+    at the app layer -- the DB column is a plain TEXT[], no uniqueness
+    constraint on array contents)."""
+    cur.execute(
+        """
+        UPDATE platform.insurance_carrier
+        SET aliases = CASE
+                WHEN EXISTS (SELECT 1 FROM unnest(aliases) a WHERE lower(a) = lower(%s))
+                THEN aliases
+                ELSE array_append(aliases, %s)
+            END,
+            updated_by = %s
+        WHERE id = %s
+        RETURNING *
+        """,
+        (alias, alias, actor, carrier_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"No insurance_carrier with id={carrier_id}")
+    return _insurance_carrier_from_row(row)
+
+
+def _insurance_carrier_from_row(row) -> InsuranceCarrier:
+    return InsuranceCarrier(
+        id=row["id"], name=row["name"], aliases=list(row["aliases"]) if row["aliases"] is not None else [],
+        fax=row["fax"], email=row["email"], phone=row["phone"],
+        claims_mailing_address=row["claims_mailing_address"], notes=row["notes"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+        created_by=row["created_by"], updated_by=row["updated_by"],
+    )
+
+
+def create_adjuster(cur, adjuster: Adjuster, actor: str) -> Adjuster:
+    cur.execute(
+        """
+        INSERT INTO platform.adjuster (carrier_id, name, phone, email, notes, created_by, updated_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (adjuster.carrier_id, adjuster.name, adjuster.phone, adjuster.email, adjuster.notes, actor, actor),
+    )
+    return _adjuster_from_row(cur.fetchone())
+
+
+def get_adjuster(cur, adjuster_id: int) -> Optional[Adjuster]:
+    cur.execute("SELECT * FROM platform.adjuster WHERE id = %s", (adjuster_id,))
+    row = cur.fetchone()
+    return _adjuster_from_row(row) if row else None
+
+
+def list_adjusters_for_carrier(cur, carrier_id: int) -> list[Adjuster]:
+    cur.execute("SELECT * FROM platform.adjuster WHERE carrier_id = %s ORDER BY name", (carrier_id,))
+    return [_adjuster_from_row(r) for r in cur.fetchall()]
+
+
+def _adjuster_from_row(row) -> Adjuster:
+    return Adjuster(
+        id=row["id"], carrier_id=row["carrier_id"], name=row["name"],
+        phone=row["phone"], email=row["email"], notes=row["notes"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+        created_by=row["created_by"], updated_by=row["updated_by"],
     )

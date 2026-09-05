@@ -264,3 +264,31 @@ Confirmed live: correct 10-column structure, all 15 constraints present,
 **Tagged and pushed** as `elektrica-migration-011-production`.
 
 ---
+
+## PENDING — platform.insurance_carrier + platform.adjuster built (migration 013), staging-only
+
+**What:** `migrations/013_platform_insurance_carrier.sql` -- handoff
+§1.4/§2.8's carrier/adjuster records. Built this cron cycle after
+distinguishing (in docs/BUILD_LOG.md's 2026-09-05 entry) that this
+SCHEMA is not actually blocked by the same export as the historical
+`insurer_payment` import (handoff §2.9) -- only the historical rows are.
+
+**Why queued rather than promoted:** genuinely new schema Jed hasn't
+reviewed yet, same posture as migration 010 (`platform.communication`)
+before its own review. No functional urgency to promote -- nothing in
+production yet FKs to it.
+
+**What's ready for review:** `platform.insurance_carrier` (name UNIQUE +
+`aliases TEXT[]`) and `platform.adjuster` (carrier_id FK, name UNIQUE per
+carrier), full app-layer CRUD + HTTP routes, 7/7 verify_013.sql checks
+passed on staging, 14/14 new test_api.py cases passed, live-verified
+against real staging Postgres via a real uvicorn server (created/found/
+listed carriers and adjusters, confirmed 409/404 behavior).
+
+**Also queued for Jed's attention, not urgent:** once this is reviewed,
+`elektrica.demand.carrier_name`/`adjuster_name` (currently PLACEHOLDER
+free text, migrations/006) are the natural next thing to wire to these
+tables by id -- flagged as a separate future migration in BUILD_LOG.md,
+not done this cycle.
+
+---

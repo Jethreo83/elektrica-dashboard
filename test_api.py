@@ -18,10 +18,10 @@ from fastapi.testclient import TestClient
 
 from app.api import app, get_cursor
 from app.models import (
-    ComparableSet, Communication, CommunicationChannel, CommunicationDirection,
+    Adjuster, ComparableSet, Communication, CommunicationChannel, CommunicationDirection,
     CommunicationMatchStatus, ComplianceItem, ComplianceItemStatus,
     ComplianceItemType, Demand, DemandRecipientType, DemandType,
-    Document, DocumentTemplate, DocumentTemplateFamily, OutboundChannel,
+    Document, DocumentTemplate, DocumentTemplateFamily, InsuranceCarrier, OutboundChannel,
     OutboundLog, Payment, PaymentSource, ProposalKind, ProposalStatus,
     Renter, Rental, RentalBilledTo, RentalEvent, RentalProposal, RentalState,
     EventSource, StaffRole, StaffUser, Toll, TrackingSystem, Vehicle,
@@ -953,6 +953,122 @@ def test_reject_communication():
     check("test_reject_communication", r.status_code == 200 and r.json()["match_status"] == "rejected", r.text)
 
 
+# --- Insurance carrier + adjuster (platform.*, migrations/013) --------------
+
+def _sample_carrier(**overrides) -> InsuranceCarrier:
+    defaults = dict(id=1, name="State Farm Mutual Automobile Insurance Company", aliases=["State Farm", "SF"])
+    defaults.update(overrides)
+    return InsuranceCarrier(**defaults)
+
+
+def _sample_adjuster(**overrides) -> Adjuster:
+    defaults = dict(id=1, carrier_id=1, name="Jane Adjuster")
+    defaults.update(overrides)
+    return Adjuster(**defaults)
+
+
+def test_create_insurance_carrier():
+    with patch("app.api.repo.create_insurance_carrier", return_value=_sample_carrier()):
+        r = client.post(
+            "/insurance-carriers",
+            json={"name": "State Farm Mutual Automobile Insurance Company", "actor": "jed", "aliases": ["State Farm", "SF"]},
+        )
+    check("test_create_insurance_carrier", r.status_code == 200 and r.json()["aliases"] == ["State Farm", "SF"], r.text)
+
+
+def test_create_insurance_carrier_duplicate_returns_409():
+    with patch("app.api.repo.create_insurance_carrier", side_effect=psycopg2.errors.UniqueViolation()):
+        r = client.post("/insurance-carriers", json={"name": "State Farm", "actor": "jed"})
+    check("test_create_insurance_carrier_duplicate_returns_409", r.status_code == 409, r.text)
+
+
+def test_list_insurance_carriers():
+    with patch("app.api.repo.list_insurance_carriers", return_value=[_sample_carrier()]):
+        r = client.get("/insurance-carriers")
+    check("test_list_insurance_carriers", r.status_code == 200 and len(r.json()) == 1, r.text)
+
+
+def test_find_insurance_carrier_found():
+    with patch("app.api.repo.find_insurance_carrier_by_name_or_alias", return_value=_sample_carrier()):
+        r = client.get("/insurance-carriers/find", params={"name": "SF"})
+    check("test_find_insurance_carrier_found", r.status_code == 200 and r.json()["id"] == 1, r.text)
+
+
+def test_find_insurance_carrier_not_found_returns_null_not_404():
+    with patch("app.api.repo.find_insurance_carrier_by_name_or_alias", return_value=None):
+        r = client.get("/insurance-carriers/find", params={"name": "Nobody Insurance"})
+    check("test_find_insurance_carrier_not_found_returns_null_not_404", r.status_code == 200 and r.json() is None, r.text)
+
+
+def test_get_insurance_carrier_found():
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()):
+        r = client.get("/insurance-carriers/1")
+    check("test_get_insurance_carrier_found", r.status_code == 200 and r.json()["name"].startswith("State Farm"), r.text)
+
+
+def test_get_insurance_carrier_not_found():
+    with patch("app.api.repo.get_insurance_carrier", return_value=None):
+        r = client.get("/insurance-carriers/999")
+    check("test_get_insurance_carrier_not_found", r.status_code == 404, r.text)
+
+
+def test_add_insurance_carrier_alias():
+    with patch("app.api.repo.add_insurance_carrier_alias", return_value=_sample_carrier(aliases=["State Farm", "SF", "SFM"])):
+        r = client.post("/insurance-carriers/1/aliases", json={"alias": "SFM", "actor": "jed"})
+    check("test_add_insurance_carrier_alias", r.status_code == 200 and "SFM" in r.json()["aliases"], r.text)
+
+
+def test_add_insurance_carrier_alias_not_found():
+    with patch("app.api.repo.add_insurance_carrier_alias", side_effect=ValueError("No insurance_carrier with id=999")):
+        r = client.post("/insurance-carriers/999/aliases", json={"alias": "X", "actor": "jed"})
+    check("test_add_insurance_carrier_alias_not_found", r.status_code == 404, r.text)
+
+
+def test_create_adjuster():
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch("app.api.repo.create_adjuster", return_value=_sample_adjuster()):
+        r = client.post("/insurance-carriers/1/adjusters", json={"name": "Jane Adjuster", "actor": "jed"})
+    check("test_create_adjuster", r.status_code == 200 and r.json()["carrier_id"] == 1, r.text)
+
+
+def test_create_adjuster_carrier_not_found():
+    with patch("app.api.repo.get_insurance_carrier", return_value=None):
+        r = client.post("/insurance-carriers/999/adjusters", json={"name": "Nobody", "actor": "jed"})
+    check("test_create_adjuster_carrier_not_found", r.status_code == 404, r.text)
+
+
+def test_create_adjuster_duplicate_at_same_carrier_returns_409():
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch("app.api.repo.create_adjuster", side_effect=psycopg2.errors.UniqueViolation()):
+        r = client.post("/insurance-carriers/1/adjusters", json={"name": "Jane Adjuster", "actor": "jed"})
+    check("test_create_adjuster_duplicate_at_same_carrier_returns_409", r.status_code == 409, r.text)
+
+
+def test_list_adjusters_for_carrier():
+    with patch("app.api.repo.get_insurance_carrier", return_value=_sample_carrier()), \
+         patch("app.api.repo.list_adjusters_for_carrier", return_value=[_sample_adjuster()]):
+        r = client.get("/insurance-carriers/1/adjusters")
+    check("test_list_adjusters_for_carrier", r.status_code == 200 and len(r.json()) == 1, r.text)
+
+
+def test_list_adjusters_for_carrier_not_found():
+    with patch("app.api.repo.get_insurance_carrier", return_value=None):
+        r = client.get("/insurance-carriers/999/adjusters")
+    check("test_list_adjusters_for_carrier_not_found", r.status_code == 404, r.text)
+
+
+def test_get_adjuster_found():
+    with patch("app.api.repo.get_adjuster", return_value=_sample_adjuster()):
+        r = client.get("/adjusters/1")
+    check("test_get_adjuster_found", r.status_code == 200 and r.json()["name"] == "Jane Adjuster", r.text)
+
+
+def test_get_adjuster_not_found():
+    with patch("app.api.repo.get_adjuster", return_value=None):
+        r = client.get("/adjusters/999")
+    check("test_get_adjuster_not_found", r.status_code == 404, r.text)
+
+
 if __name__ == "__main__":
     tests = [
         test_health, test_fleet_out,
@@ -1008,6 +1124,15 @@ if __name__ == "__main__":
         test_create_communication_bad_channel_returns_400,
         test_get_pending_communication_matches, test_get_communications_for_source,
         test_confirm_communication, test_confirm_communication_not_found, test_reject_communication,
+        test_create_insurance_carrier, test_create_insurance_carrier_duplicate_returns_409,
+        test_list_insurance_carriers, test_find_insurance_carrier_found,
+        test_find_insurance_carrier_not_found_returns_null_not_404,
+        test_get_insurance_carrier_found, test_get_insurance_carrier_not_found,
+        test_add_insurance_carrier_alias, test_add_insurance_carrier_alias_not_found,
+        test_create_adjuster, test_create_adjuster_carrier_not_found,
+        test_create_adjuster_duplicate_at_same_carrier_returns_409,
+        test_list_adjusters_for_carrier, test_list_adjusters_for_carrier_not_found,
+        test_get_adjuster_found, test_get_adjuster_not_found,
     ]
     for t in tests:
         t()
