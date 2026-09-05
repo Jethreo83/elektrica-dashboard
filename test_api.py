@@ -752,6 +752,55 @@ def test_mark_demand_sent():
     check("test_mark_demand_sent", r.status_code == 200 and r.json()["status"] == "sent")
 
 
+def test_advance_demand_status_to_negotiating():
+    from app.models import DemandStatus
+    negotiating = _sample_demand(status=DemandStatus.NEGOTIATING, sent_via="fax")
+    with patch("app.api.repo.advance_demand_status", return_value=negotiating):
+        r = client.post("/demands/1/status", json={"target_status": "negotiating", "actor": "jed"})
+    check(
+        "test_advance_demand_status_to_negotiating",
+        r.status_code == 200 and r.json()["status"] == "negotiating", r.text,
+    )
+
+
+def test_advance_demand_status_to_resolved():
+    from app.models import DemandStatus
+    resolved = _sample_demand(status=DemandStatus.RESOLVED, sent_via="fax")
+    with patch("app.api.repo.advance_demand_status", return_value=resolved):
+        r = client.post("/demands/1/status", json={"target_status": "resolved", "actor": "jed"})
+    check(
+        "test_advance_demand_status_to_resolved",
+        r.status_code == 200 and r.json()["status"] == "resolved", r.text,
+    )
+
+
+def test_advance_demand_status_invalid_enum_returns_400():
+    r = client.post("/demands/1/status", json={"target_status": "bogus", "actor": "jed"})
+    check("test_advance_demand_status_invalid_enum_returns_400", r.status_code == 400, r.text)
+
+
+def test_advance_demand_status_illegal_transition_returns_400():
+    # repo.advance_demand_status raises ValueError for an illegal
+    # transition (e.g. sent -> accepted skips negotiating/no_offer) --
+    # this mocks that real repository behavior (validate_demand_transition,
+    # app/models.py) rather than re-deriving the sequence in the test.
+    with patch(
+        "app.api.repo.advance_demand_status",
+        side_effect=ValueError(
+            "Invalid demand status transition: sent -> accepted. "
+            "Valid next states: ['negotiating', 'resolved']"
+        ),
+    ):
+        r = client.post("/demands/1/status", json={"target_status": "accepted", "actor": "jed"})
+    check("test_advance_demand_status_illegal_transition_returns_400", r.status_code == 400, r.text)
+
+
+def test_advance_demand_status_not_found_returns_400():
+    with patch("app.api.repo.advance_demand_status", side_effect=ValueError("No demand with id=999")):
+        r = client.post("/demands/999/status", json={"target_status": "negotiating", "actor": "jed"})
+    check("test_advance_demand_status_not_found_returns_400", r.status_code == 400, r.text)
+
+
 def test_get_aging_demands():
     with patch("app.api.repo.list_aging_demands", return_value=[{"id": 1, "days_since_sent": 50}]):
         r = client.get("/demands/aging")
@@ -1464,7 +1513,12 @@ if __name__ == "__main__":
         test_create_demand_unknown_carrier_id_returns_400,
         test_create_demand_mismatched_adjuster_carrier_returns_400,
         test_get_rental_demands, test_get_rental_demands_rental_not_found,
-        test_mark_demand_sent, test_get_aging_demands,
+        test_mark_demand_sent,
+        test_advance_demand_status_to_negotiating, test_advance_demand_status_to_resolved,
+        test_advance_demand_status_invalid_enum_returns_400,
+        test_advance_demand_status_illegal_transition_returns_400,
+        test_advance_demand_status_not_found_returns_400,
+        test_get_aging_demands,
         test_create_comparable_set, test_create_comparable_set_demand_not_found,
         test_create_comparable_set_bad_date_range_returns_400,
         test_create_comparable_set_bad_vehicle_class_returns_400,

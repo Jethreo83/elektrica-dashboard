@@ -64,6 +64,7 @@ from app.models import (
     ComplianceItemType,
     Demand,
     DemandRecipientType,
+    DemandStatus,
     DemandType,
     Communication,
     CommunicationChannel,
@@ -581,6 +582,16 @@ class DemandOut(BaseModel):
 
 class MarkSentRequest(BaseModel):
     sent_via: str
+    actor: str
+
+
+class DemandStatusRequest(BaseModel):
+    """BACKLOG.md's logged gap: there was previously no route to advance
+    a demand past 'sent'. target_status is validated against
+    DEMAND_VALID_NEXT_STATES (app/models.py) inside
+    repository.advance_demand_status -- draft->sent stays mark-sent's
+    job only, so 'draft' is not a legal target_status here."""
+    target_status: str
     actor: str
 
 
@@ -1358,6 +1369,31 @@ def get_rental_demands(rental_id: int, cur=Depends(get_cursor)):
 def mark_demand_sent(demand_id: int, body: MarkSentRequest, cur=Depends(get_cursor)):
     try:
         demand = repo.mark_demand_sent(cur, demand_id, body.sent_via, body.actor)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _demand_to_out(demand)
+
+
+@app.post("/demands/{demand_id}/status", response_model=DemandOut)
+def advance_demand_status(demand_id: int, body: DemandStatusRequest, cur=Depends(get_cursor)):
+    """BACKLOG.md's logged gap, closed: the only way to move a demand
+    past 'sent' (negotiating/no_offer/accepted/resolved) was previously a
+    direct DB write -- migrations/016's own live-verification had to fall
+    back to one. Moving a carrier-recipient demand INTO 'resolved' is what
+    fires migrations/016's auto-population trigger for elektrica.insurer_payment;
+    this route is now that trigger's real dashboard-reachable entry point.
+    No DB trigger enforces this table's sequence (unlike transition_rental) --
+    repo.advance_demand_status's validate_demand_transition call is the
+    actual enforcement, not a redundant pre-check."""
+    try:
+        target = DemandStatus(body.target_status)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"target_status={body.target_status!r} must be one of {[s.value for s in DemandStatus]}",
+        )
+    try:
+        demand = repo.advance_demand_status(cur, demand_id, target, body.actor)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _demand_to_out(demand)

@@ -646,6 +646,52 @@ def validate_rental_transition(current: RentalState, target: RentalState) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Demand status sequence -- BACKLOG.md's "no HTTP route exists to advance a
+# demand to 'resolved'" gap (surfaced by migrations/016's live-verification,
+# which had to fall back to a direct DB write). Unlike RENTAL_VALID_NEXT_STATES,
+# there is NO DB-level trigger enforcing this sequence on elektrica.demand --
+# migrations/006's own header flags demand_status as PLACEHOLDER ("each has
+# its own lifecycle", not literally enumerated), and migrations/016 confirmed
+# no state-machine trigger was ever built for it. So THIS dict (not a DB
+# trigger) is the actual enforcement for this one table -- opposite of the
+# rental pattern, flagged here rather than silently copying a docstring that
+# would no longer be true. draft->sent stays exclusively mark_demand_sent's
+# job (it also writes sent_via/sent_at); this covers sent and beyond. Shape
+# mirrors RENTAL_VALID_NEXT_STATES: each non-terminal state can advance to
+# its expected next step OR skip straight to resolved (a demand paid in
+# full with no negotiation round, or closed as a write-off).
+# ---------------------------------------------------------------------------
+
+DEMAND_VALID_NEXT_STATES: dict[DemandStatus, list[DemandStatus]] = {
+    DemandStatus.SENT: [DemandStatus.NEGOTIATING, DemandStatus.RESOLVED],
+    DemandStatus.NEGOTIATING: [DemandStatus.NO_OFFER, DemandStatus.RESOLVED],
+    DemandStatus.NO_OFFER: [DemandStatus.ACCEPTED, DemandStatus.RESOLVED],
+    DemandStatus.ACCEPTED: [DemandStatus.RESOLVED],
+    DemandStatus.RESOLVED: [],
+}
+
+
+def validate_demand_transition(current: DemandStatus, target: DemandStatus) -> None:
+    """Pre-flight check for repository.advance_demand_status(). Unlike
+    validate_rental_transition, this IS the real enforcement (no DB trigger
+    backs it up) -- see DEMAND_VALID_NEXT_STATES docstring above. 'draft' is
+    deliberately excluded: draft->sent only happens via mark_demand_sent,
+    which also has to write sent_via/sent_at, so it is not part of this
+    dict or this function's domain."""
+    if current == DemandStatus.DRAFT:
+        raise ValueError(
+            "Cannot use advance_demand_status on a draft demand -- use "
+            "mark_demand_sent (draft -> sent) first."
+        )
+    valid = DEMAND_VALID_NEXT_STATES.get(current, [])
+    if target not in valid:
+        raise ValueError(
+            f"Invalid demand status transition: {current.value} -> {target.value}. "
+            f"Valid next states: {[s.value for s in valid]}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # InsuranceCarrier + Adjuster -- mirrors platform.insurance_carrier /
 # platform.adjuster (migrations/013). Handoff §1.4 ("Canonical carrier
 # record... Shared between VLS and Elektrica Rentals") / §2.8 ("adjuster:

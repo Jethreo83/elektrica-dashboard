@@ -2437,3 +2437,82 @@ promotion still pending Jed's explicit per-table sign-off; migration
 **Committed & pushed:** `9c38383` (migration 016 + app layer + tests),
 `4a83ac9` (docs) → `origin/main`, no rebase conflicts.
 
+---
+
+## 2026-09-05 (cron cycle, later) — POST /demands/{id}/status; closes the "no route to resolve a demand" gap this same day's earlier cycle logged
+
+**What:** BACKLOG.md's gap from earlier this cycle (migration 016's own
+live-verification needed a direct DB write to flip a demand to
+'resolved', because no HTTP route existed past `mark-sent`) is now closed.
+`POST /demands/{demand_id}/status` (`app/api.py`, `DemandStatusRequest`
+body: `target_status` + `actor`) covers every transition after
+`mark-sent`: sent -> negotiating -> no_offer -> accepted -> resolved,
+plus skip-ahead-to-resolved at any of those points (a demand paid in
+full with no negotiation round, or closed as a write-off) -- same shape
+as `RENTAL_VALID_NEXT_STATES`. `draft -> sent` stays exclusively
+`mark-sent`'s job (it also writes `sent_via`/`sent_at`); this route
+rejects `target_status='draft'`... actually rejects any transition
+*from* `draft` (there is no valid target for a draft demand via this
+route at all).
+
+**Key finding while building this:** unlike `elektrica.rental_state`,
+which has a real DB-level enforcement function
+(`elektrica.rental_valid_next_states()`, migration 003) that
+`advance_rental_state()`/`transition_rental` defer to as the actual
+source of truth, `elektrica.demand_status` has **no DB trigger
+enforcing its sequence at all** -- migration 006's own header already
+flagged `demand_status` as PLACEHOLDER ("each has its own lifecycle",
+never literally enumerated by Jed), and migration 016 never built one
+either. Confirmed this by reading both migrations directly rather than
+assuming the rental pattern also applied here. Consequence: the new
+`app/models.py` `DEMAND_VALID_NEXT_STATES` dict + `validate_demand_transition()`
+IS the real enforcement for this table, not a redundant fast-path
+pre-check the way `validate_rental_transition` is for rentals -- said so
+explicitly in both docstrings so a future session doesn't wrongly assume
+the DB has this covered and skip validating client input.
+
+**App layer:** `app/models.py` (`DEMAND_VALID_NEXT_STATES`,
+`validate_demand_transition()`), `app/repository.py`
+(`advance_demand_status()` -- looks up the current demand, validates the
+transition, then a plain `UPDATE ... SET status = %s, updated_by = %s`;
+no `rental_event`-style audit table exists for demands so `updated_at`/
+`updated_by` via the existing `trg_demand_set_updated_at` trigger,
+migration 006, is the only record of who/when a status changed),
+`app/api.py` (`DemandStatusRequest` model, the new route -- unknown
+`target_status` string -> 400 same pattern as `transition_rental`'s
+`target_state` handling; any `ValueError` from `advance_demand_status`
+-- not-found or illegal-transition -- also -> 400).
+
+**Why this route matters beyond just closing a backlog item:** moving a
+carrier-recipient demand INTO 'resolved' is exactly what fires migration
+016's `trg_demand_create_insurer_payment_on_resolve` trigger. Before this
+route existed, that trigger -- despite being fully built and DB-verified
+-- had no way to fire from actual dashboard use, only a direct DB write.
+This route is now that trigger's real, dashboard-reachable entry point.
+
+**Tests:** 5 new `test_api.py` cases (`test_advance_demand_status_to_negotiating`,
+`test_advance_demand_status_to_resolved`,
+`test_advance_demand_status_invalid_enum_returns_400`,
+`test_advance_demand_status_illegal_transition_returns_400` -- mocks
+`repo.advance_demand_status` raising the real `validate_demand_transition`
+error shape rather than re-deriving the sequence in the test,
+`test_advance_demand_status_not_found_returns_400`). 180/180 pytest (was
+175), 141/141 manual runner (`python test_api.py`, was 136), both green.
+
+**Not live-verified against real staging Postgres this cycle:** this
+shell's exported `DATABASE_URL` points at `ep-damp-bird-...`, which
+matches neither this repo's own `.env.example` nor
+`complete-collision-dashboard`'s (`ep-bold-leaf-...`), and no local
+`.env` file exists here to source the real password. This is exactly
+the stale/foreign-env-var failure mode `scripts/run_dev_server.py`'s own
+header comment already warns about. Chose not to boot a scratch uvicorn
+against an unverified connection string rather than risk writing to the
+wrong database or fabricating a "verified" result. Mocked-repository
+test coverage above is real and green; the actual staging round-trip
+(POST a real status transition through to 'resolved' on a real
+carrier-recipient demand, confirm `insurer_payment` populates via the
+dashboard rather than a direct DB write) is the concrete next-cycle
+follow-up once a trustworthy `DATABASE_URL` is available in this shell.
+Not fabricating a live-verification writeup to match this repo's usual
+standard when it did not actually happen this cycle.
+

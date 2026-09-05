@@ -343,7 +343,72 @@ own lifecycle" per handoff, not literally enumerated) -- so there's no
 sequence to violate, just a missing route. Not blocked on anything;
 straightforward next item.
 
+## RESOLVED 2026-09-05 (cron cycle) — elektrica.demand HTTP route to reach 'resolved' built
+
+**What:** closed the gap logged directly above (surfaced by migration
+016's own live-verification, which had to fall back to a direct DB
+write to flip a demand to 'resolved'). New route
+`POST /demands/{id}/status` (`app/api.py`) takes `target_status` +
+`actor`, covers every transition past `mark-sent` (sent -> negotiating
+-> no_offer -> accepted -> resolved, plus the "resolved with no
+negotiation round" and "resolved as a write-off" skip-ahead paths
+`elektrica.rental`'s own state machine already allows for its `demand_sent
+-> resolved` edge). `draft -> sent` is deliberately excluded from this
+route -- that stays `mark-sent`'s job alone, since it also has to write
+`sent_via`/`sent_at`.
+
+**How it's enforced (materially different from `transition_rental`):**
+confirmed via migration 016's own header + re-reading migration 006 that
+NO DB trigger enforces `elektrica.demand_status` sequencing the way
+`elektrica.rental_valid_next_states()` (migration 003) enforces
+`elektrica.rental_state` -- migration 006 flagged `demand_status` as
+PLACEHOLDER precisely because the handoff never enumerated a lifecycle.
+So `app/models.py`'s new `DEMAND_VALID_NEXT_STATES` dict +
+`validate_demand_transition()` is the REAL enforcement here, not a
+redundant fast-path pre-check like `validate_rental_transition` is for
+rentals -- flagged this distinction explicitly in both functions'
+docstrings so a future session doesn't assume the DB has this covered.
+Sequence chosen: `sent -> {negotiating, resolved}`,
+`negotiating -> {no_offer, resolved}`, `no_offer -> {accepted, resolved}`,
+`accepted -> {resolved}`, `resolved -> {}` (terminal) -- same
+skip-to-resolved-at-any-point shape as `RENTAL_VALID_NEXT_STATES`, for
+consistency with the one lifecycle in this codebase Jed actually
+described end to end.
+
+**App layer:** `app/models.py` (`DEMAND_VALID_NEXT_STATES`,
+`validate_demand_transition()`), `app/repository.py`
+(`advance_demand_status()` -- validates then a plain column UPDATE;
+no `rental_event`-style audit table exists for demands, so
+`updated_by`/`updated_at` via the existing `trg_demand_set_updated_at`
+trigger, migration 006, is the only record of who/when), `app/api.py`
+(`DemandStatusRequest` model, `POST /demands/{id}/status` route --
+maps an unknown `target_status` string to 400 same as
+`transition_rental`'s `target_state` handling, and any `ValueError`
+from `advance_demand_status` — not-found or illegal-transition — to 400).
+
+**Tests:** 5 new `test_api.py` cases (advance to negotiating, advance to
+resolved, invalid enum value -> 400, illegal transition -> 400 mocking
+`validate_demand_transition`'s real error shape, not-found -> 400). Both
+suites green after: 180/180 pytest (was 175), 141/141 manual runner
+(`python test_api.py`, was 136).
+
+**Not live-verified against real staging Postgres this cycle:** the
+shell's exported `DATABASE_URL` (`ep-damp-bird-...`) does not match
+either this repo's `.env.example` or `complete-collision-dashboard`'s
+(`ep-bold-leaf-...`), and no local `.env` file exists here to source the
+real password — a stale/foreign env var, exactly the failure mode
+`scripts/run_dev_server.py`'s own header and `.env.example`'s comment
+both already warn about. Did not attempt a live HTTP round-trip against
+an unverified connection string; mocked-repository test coverage above is
+real and green, but the actual staging round-trip (booting a scratch
+uvicorn, POSTing a real status transition, confirming `insurer_payment`
+now populates via the dashboard rather than a direct DB write) is the
+natural next-cycle follow-up once a trustworthy `DATABASE_URL` is
+available in this shell.
+
 ---
+
+
 
 ## RESOLVED 2026-09-05 (cron cycle) — elektrica.insurer_payment (migration 016) built
 

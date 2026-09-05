@@ -671,6 +671,41 @@ def mark_demand_sent(cur, demand_id: int, sent_via: str, actor: str) -> Demand:
     return _demand_from_row(row)
 
 
+def advance_demand_status(cur, demand_id: int, target, actor: str) -> Demand:
+    """Advances elektrica.demand.status past 'sent' -- BACKLOG.md's
+    logged gap (surfaced by migrations/016's live-verification, which had
+    no HTTP route and fell back to a direct DB write to reach 'resolved').
+    Unlike advance_rental_state, there is NO DB trigger enforcing this
+    table's sequence (migrations/006 flags demand_status as PLACEHOLDER,
+    "each has its own lifecycle", never literally enumerated; migrations/016
+    confirmed no state-machine trigger exists here) -- validate_demand_transition
+    (app/models.py) is the real enforcement, checked here before the UPDATE,
+    not just for fast client feedback. Plain column UPDATE, no rental_event-
+    style audit table exists for demands; updated_by/updated_at are the only
+    record of who/when. Moving status TO 'resolved' is what fires
+    migrations/016's trg_demand_create_insurer_payment_on_resolve trigger
+    for carrier-recipient demands -- this is now that trigger's real,
+    dashboard-reachable entry point."""
+    from app.models import validate_demand_transition  # local import, same discipline as create_comparable_set's Demand import
+
+    current = get_demand(cur, demand_id)
+    if current is None:
+        raise ValueError(f"No demand with id={demand_id}")
+    validate_demand_transition(current.status, target)
+
+    cur.execute(
+        """
+        UPDATE elektrica.demand
+        SET status = %s, updated_by = %s
+        WHERE id = %s
+        RETURNING *
+        """,
+        (target.value, actor, demand_id),
+    )
+    row = cur.fetchone()
+    return _demand_from_row(row)
+
+
 def list_aging_demands(cur) -> list[dict]:
     """Reads elektrica.aging_demands (migrations/006) -- "a demand at 45
     days with no offer ... silence is the signal", handoff §2.4."""
