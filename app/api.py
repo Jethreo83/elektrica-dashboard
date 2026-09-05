@@ -54,6 +54,7 @@ from pydantic import BaseModel
 
 from app import db
 from app import repository as repo
+from app.normalize import normalize_email, normalize_phone
 from app.models import (
     ComparableSet,
     ComplianceItem,
@@ -851,19 +852,21 @@ def intake_renter(body: RenterIntakeIn, cur=Depends(get_privileged_cursor)):
     configured) has no path to either, confirmed by direct query against
     real staging Postgres this cycle.
 
-    Does not itself normalize email/phone (lowercasing, digit-stripping,
-    etc.) before calling repo.match_or_create_and_link_renter() --
-    platform.match_or_create_person()'s own exact-match step does a
-    literal equality comparison against already-normalized
-    platform.person rows, so un-normalized input here would silently
-    under-match. No normalization utility exists yet in this codebase to
-    call instead of inventing one inline -- flagged as a real gap, not
-    silently done wrong: docs/BACKLOG.md gets an entry for this."""
+    Normalizes email/phone via app.normalize (lowercase+strip email,
+    digits-only phone) before calling
+    repo.match_or_create_and_link_renter() -- closes the gap flagged in
+    docs/BACKLOG.md's 2026-09-05 entry: platform.match_or_create_person()'s
+    exact-match step does a literal equality comparison against
+    already-normalized platform.person rows, so un-normalized input here
+    would silently under-match and create a duplicate person. See
+    app/normalize.py's module docstring for the phone-format caveat
+    (unconfirmed against real data -- every existing platform.person row
+    has phone_normalized IS NULL)."""
     result = repo.match_or_create_and_link_renter(
         cur, body.first_name, body.last_name, body.actor,
         date_of_birth=body.date_of_birth,
-        email_normalized=body.email,
-        phone_normalized=body.phone,
+        email_normalized=normalize_email(body.email),
+        phone_normalized=normalize_phone(body.phone),
         jotform_submission_ref=body.jotform_submission_ref,
         drive_folder_ref=body.drive_folder_ref,
     )

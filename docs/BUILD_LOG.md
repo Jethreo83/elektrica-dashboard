@@ -1762,3 +1762,77 @@ exists yet to confirm-or-split a queued match -- this cycle's own
 queue_id=2 row is a live example sitting unresolved), and (c) frontend,
 still fully unstarted.
 
+## 2026-09-05 (cron cycle, later) -- email/phone normalization utility, closes prior backlog item
+
+Closed item (a) from the previous cycle's entry: pure app-layer addition,
+no schema change, sitting on the already-existing `POST /renters/intake`
+route.
+
+**`app/normalize.py`** (new): `normalize_email()` (lowercase + strip,
+`None`/blank -> `None`) and `normalize_phone()` (strip to digits-only,
+`None`/blank/no-digits -> `None`). Deliberately kept Elektrica-local, not
+extracted to a shared `platform.*` module -- checked Complete Collision's
+equivalent call site first (`app/repository.py`'s
+`create_customer_and_link()`): it inlines `email.strip().lower()` for
+email only, does not normalize phone at all, and still does a bespoke
+raw `INSERT INTO platform.person` rather than calling
+`platform.match_or_create_person()` (a known, separately-flagged gap in
+that repo). Per ADR-001's own extraction rule ("`_shared` extracted only
+when a second consumer exists"), Collision's inline email-only version
+doesn't make this a second real consumer of the phone-normalizing half --
+Elektrica is effectively first. Documented in the module's own docstring
+so this isn't rediscovered as an oversight later; promote to `platform`
+the moment a second real phone-normalizing consumer shows up.
+
+**`app/api.py`**: `POST /renters/intake` now calls `normalize_email()`/
+`normalize_phone()` on `body.email`/`body.phone` before passing to
+`repo.match_or_create_and_link_renter()` -- previously passed raw
+JotForm-submitted strings straight through, which would silently
+under-match against already-normalized `platform.person` rows (the exact
+duplicate-creation risk this closes).
+
+**`test_normalize.py`** (new): 12 cases -- lowercasing, whitespace
+stripping, None/blank -> None for both, punctuation/letter stripping for
+phone, and one case (`test_normalize_phone_leading_country_code_not_stripped`)
+explicitly pinning the CURRENT documented behavior (no US country-code
+stripping) so a future change to it is a visible diff, not a silent
+regression. **157/157 pytest** (up from 145/145 -- 12 new). Manual
+runners unaffected: `test_models.py` 27/27, `test_api.py` 118/118 --
+`test_normalize.py` follows the same standalone-runnable pattern and was
+run directly (12/12).
+
+**Live-verified against real staging Postgres** (uvicorn port 8631,
+`neondb_owner`-class `DATABASE_URL` inline, no `ELEKTRICA_DB_SET_ROLE` --
+same deploy shape as the intake route's own intended use): submitted a
+mixed-case, padded email -> `created` (person_id=41), then the
+already-normalized form of the SAME email -> `attached`, same
+person_id=41 -- proving the normalization actually prevents the
+duplicate, not just theoretically. Same proof for phone: a punctuated
+number -> `created` (person_id=42), then its digits-only form ->
+`attached`, same person_id=42. Directly queried `platform.person`
+afterward to confirm the STORED values are actually normalized at rest
+(id 41: lowercase/stripped email; id 42: digits-only phone, no
+punctuation) -- not just coincidentally matching. Server killed after;
+`netstat` confirmed no LISTENING socket left on 8631 (only expected
+client-side `TIME_WAIT` residue). Scratch verification script
+(`scripts/_check_norm_smoke.py`) deleted immediately after use.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every prior smoke run in this repo): `platform.person` ids
+41/42; `elektrica.renter` ids 14/15.
+
+**Not done / explicitly deferred (unchanged):** `insurer_payment` import
+still export-blocked; migrations 002-010/012-014 remain staging-only
+pending Jed's review; no auth/session layer on any route; frontend not
+started; migration 007's `vls.case` grant-scope flag for Jed still open;
+`platform.person_match_queue` id=2 (from a prior cycle) still sits
+pending human resolution -- no admin action exists yet to confirm-or-split
+it.
+
+**Next up:** with both concrete backend items from the prior cycle now
+closed, the two remaining fronts are (a) a `platform.person_match_queue`
+resolution admin action (confirm-or-split a queued match -- queue_id=2 is
+a live, currently-unresolved example) and (b) frontend, still fully
+unstarted. Picking (a) next cycle by default since it is the smaller,
+more concrete gap and directly unblocks a currently-stuck real row.
+

@@ -7,6 +7,28 @@ from scratch or, worse, do it differently by accident.
 
 ---
 
+## RESOLVED 2026-09-05 (cron cycle, later) — email/phone normalization utility built
+
+**What:** the entry directly below this one (same date, earlier cycle)
+flagged that no email/phone normalization utility existed before calling
+`platform.match_or_create_person()`. Closed this cycle by
+`app/normalize.py` (`normalize_email()`, `normalize_phone()`), wired into
+`POST /renters/intake` (`app/api.py`). See `docs/BUILD_LOG.md`'s matching
+entry for the full writeup (scope decision -- kept Elektrica-local, not
+extracted to `platform.*`, since Collision's inline email-only version
+doesn't count as a second real consumer of the phone half; 12 new
+`test_normalize.py` cases; live HTTP verification against real staging
+proving a mixed-case email and a punctuated phone both correctly attach
+to the same `platform.person` instead of creating a duplicate).
+
+**Still open:** phone format is UNCONFIRMED against real data (every
+`platform.person` row on staging has `phone_normalized IS NULL`) --
+`normalize_phone()` strips to digits-only with NO US country-code
+stripping, flagged in the module's own docstring as an assumption Jed
+should confirm once real phone data exists to check it against.
+
+---
+
 ## NEW 2026-09-05 (cron cycle) — no email/phone normalization utility exists
 
 **What:** `platform.match_or_create_person()`'s exact-match step does a
