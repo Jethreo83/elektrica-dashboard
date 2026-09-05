@@ -1163,3 +1163,137 @@ def _adjuster_from_row(row) -> Adjuster:
         created_at=row["created_at"], updated_at=row["updated_at"],
         created_by=row["created_by"], updated_by=row["updated_by"],
     )
+
+
+# ---------------------------------------------------------------------------
+# platform.person_match_queue -- confirm-or-split admin action, closing the
+# gap flagged since the 2026-09-05 renter-intake cycle: match_or_create_
+# person()'s 'queued' outcome (close name+DOB match, no exact email/phone)
+# had no resolution path -- queue_id=2 sat pending across multiple cycles
+# because no admin action existed to act on it. This is that action.
+#
+# SCOPE BOUNDARY (hard, not a style choice): platform.person_match_queue is
+# a genuinely shared platform table -- source_project can be 'elektrica',
+# 'collision', OR 'vls'. This bot has zero relationship to VLS/Jocasta and
+# must never read or act on VLS client-matter data (attorney-client
+# privilege). Every function below explicitly filters out / refuses
+# source_project='vls' rows rather than silently being generic over all
+# three -- this is enforced in code, not just left to caller discipline.
+#
+# REQUIRES a privileged cursor (app.api.get_privileged_cursor()), same
+# reasoning as match_or_create_and_link_renter(): elektrica_app has ZERO
+# grants (not even SELECT) on platform.person_match_queue, confirmed by
+# direct query against real staging Postgres this cycle -- only
+# neondb_owner and platform_identity_service have any grant on this table.
+# ---------------------------------------------------------------------------
+
+def list_pending_person_match_queue_items(cur) -> list[dict]:
+    """Lists pending queue entries for THIS bot's businesses only --
+    excludes source_project='vls' at the query level (not just at display
+    time) per this repo's absolute VLS boundary. Elektrica's own admin
+    surface has no legitimate reason to ever enumerate a VLS row, so it
+    is never fetched, not merely filtered after the fact."""
+    cur.execute(
+        """
+        SELECT * FROM platform.person_match_queue
+        WHERE status = 'pending' AND source_project <> 'vls'
+        ORDER BY submitted_at ASC
+        """
+    )
+    return list(cur.fetchall())
+
+
+def resolve_person_match_queue(
+    cur, queue_id: int, decision: str, actor: str,
+) -> dict:
+    """Human confirm-or-split action on one platform.person_match_queue
+    row. decision must be 'confirmed_match' (the queued candidate really
+    IS the same person -- resulting_person_id = candidate_person_id, no
+    new platform.person row) or 'confirmed_split' (it is a DIFFERENT
+    person who happens to share last_name+date_of_birth -- creates a
+    brand-new platform.person row from the queue's own submitted name/
+    DOB/email/phone, resulting_person_id = that new row).
+
+    Refuses (ValueError) a source_project='vls' row outright -- this bot
+    must never resolve a VLS-domain identity match, full stop, regardless
+    of who called it or why.
+
+    If source_project == 'elektrica', also links (or finds-existing) the
+    resulting person as an elektrica.renter -- the same
+    create_renter_for_existing_person() path POST /renters/intake uses,
+    so a queued renter that finally gets resolved ends up in exactly the
+    same state a clean 'attached'/'created' intake would have produced.
+    Does NOT do the equivalent for source_project == 'collision' -- that
+    business's own renter-equivalent linking is that repo's
+    responsibility, not this one's, per this bot's own scope boundary
+    (Elektrica-only application code; platform.* is shared data, not
+    shared app logic).
+    """
+    if decision not in ("confirmed_match", "confirmed_split"):
+        raise ValueError(
+            f"decision={decision!r} must be 'confirmed_match' or 'confirmed_split'"
+        )
+
+    cur.execute(
+        "SELECT * FROM platform.person_match_queue WHERE id = %s", (queue_id,)
+    )
+    queue_row = cur.fetchone()
+    if queue_row is None:
+        raise ValueError(f"No person_match_queue row with id={queue_id}")
+    if queue_row["source_project"] == "vls":
+        raise ValueError(
+            f"person_match_queue id={queue_id} is source_project='vls' -- "
+            "this bot has no relationship to VLS/Jocasta and refuses to "
+            "act on VLS-domain identity matches (attorney-client "
+            "privilege boundary, absolute, not a style preference)."
+        )
+    if queue_row["status"] != "pending":
+        raise ValueError(
+            f"person_match_queue id={queue_id} already resolved "
+            f"(status={queue_row['status']!r}, resolved_by={queue_row['resolved_by']!r})"
+        )
+
+    if decision == "confirmed_match":
+        resulting_person_id = queue_row["candidate_person_id"]
+    else:  # confirmed_split
+        cur.execute(
+            """
+            INSERT INTO platform.person
+                (first_name, last_name, date_of_birth, email_normalized, phone_normalized, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                queue_row["first_name"], queue_row["last_name"], queue_row["date_of_birth"],
+                queue_row["email_normalized"], queue_row["phone_normalized"], actor,
+            ),
+        )
+        resulting_person_id = cur.fetchone()["id"]
+
+    cur.execute(
+        """
+        UPDATE platform.person_match_queue
+        SET status = %s, resolved_at = now(), resolved_by = %s, resulting_person_id = %s
+        WHERE id = %s AND status = 'pending'
+        RETURNING *
+        """,
+        (decision, actor, resulting_person_id, queue_id),
+    )
+    resolved_row = cur.fetchone()
+    if resolved_row is None:
+        raise ValueError(
+            f"person_match_queue id={queue_id} was resolved concurrently by another caller "
+            "(status changed between this function's own SELECT and UPDATE)."
+        )
+
+    renter = None
+    if resolved_row["source_project"] == "elektrica":
+        renter = create_renter_for_existing_person(cur, resulting_person_id, actor)
+
+    return {
+        "queue_id": queue_id,
+        "decision": decision,
+        "resulting_person_id": resulting_person_id,
+        "source_project": resolved_row["source_project"],
+        "renter": renter,
+    }

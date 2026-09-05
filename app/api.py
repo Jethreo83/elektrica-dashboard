@@ -288,6 +288,40 @@ class RenterIntakeOut(BaseModel):
     renter: Optional[RenterOut] = None
 
 
+class PersonMatchQueueItemOut(BaseModel):
+    """One pending platform.person_match_queue row -- source_project='vls'
+    rows are never even fetched by the repository query this backs (see
+    repo.list_pending_person_match_queue_items()'s own docstring), not
+    just filtered out here, per this bot's absolute VLS boundary."""
+    id: int
+    candidate_person_id: int
+    first_name: str
+    last_name: str
+    date_of_birth: Optional[date] = None
+    email_normalized: Optional[str] = None
+    phone_normalized: Optional[str] = None
+    match_reason: str
+    source_project: str
+    submitted_by: str
+    submitted_at: datetime
+
+
+class PersonMatchQueueDecisionIn(BaseModel):
+    """decision: 'confirmed_match' (queued candidate IS the same person)
+    or 'confirmed_split' (different person, coincidental last_name+DOB
+    match -- a new platform.person row is created)."""
+    decision: str
+    actor: str
+
+
+class PersonMatchQueueDecisionOut(BaseModel):
+    queue_id: int
+    decision: str
+    resulting_person_id: int
+    source_project: str
+    renter: Optional[RenterOut] = None
+
+
 class RentalOut(BaseModel):
     id: int
     vehicle_id: int
@@ -875,6 +909,43 @@ def intake_renter(body: RenterIntakeIn, cur=Depends(get_privileged_cursor)):
         person_id=result.person_id,
         queue_id=result.queue_id,
         renter=_renter_to_out(result.renter) if result.renter else None,
+    )
+
+
+@app.get("/person-match-queue/pending", response_model=list[PersonMatchQueueItemOut])
+def get_pending_person_match_queue(cur=Depends(get_privileged_cursor)):
+    """Admin surface for the confirm-or-split queue, closing the gap
+    flagged since the 2026-09-05 renter-intake cycle (queue_id=2 sat
+    pending across multiple cycles with no way to act on it). Uses
+    get_privileged_cursor() -- elektrica_app has zero grants on
+    platform.person_match_queue (confirmed by direct query against real
+    staging Postgres). Never returns source_project='vls' rows -- see
+    repo.list_pending_person_match_queue_items()'s own docstring; this
+    is enforced at the query level, not just by response filtering."""
+    return repo.list_pending_person_match_queue_items(cur)
+
+
+@app.post("/person-match-queue/{queue_id}/decision", response_model=PersonMatchQueueDecisionOut)
+def decide_person_match_queue(queue_id: int, body: PersonMatchQueueDecisionIn, cur=Depends(get_privileged_cursor)):
+    """Human confirm-or-split action. See repo.resolve_person_match_queue()'s
+    own docstring for the full decision semantics and the VLS refusal
+    (surfaced here as 403, not 400/404 -- it is an authorization boundary,
+    not a validation error or a missing-resource case)."""
+    try:
+        result = repo.resolve_person_match_queue(cur, queue_id, body.decision, body.actor)
+    except ValueError as e:
+        msg = str(e)
+        if "source_project='vls'" in msg:
+            raise HTTPException(status_code=403, detail=msg)
+        if msg.startswith("No person_match_queue"):
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    return PersonMatchQueueDecisionOut(
+        queue_id=result["queue_id"],
+        decision=result["decision"],
+        resulting_person_id=result["resulting_person_id"],
+        source_project=result["source_project"],
+        renter=_renter_to_out(result["renter"]) if result["renter"] else None,
     )
 
 

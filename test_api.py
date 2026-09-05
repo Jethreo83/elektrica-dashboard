@@ -303,6 +303,92 @@ def test_intake_renter_queued_has_no_renter():
     check("test_intake_renter_queued_no_renter", r.json()["renter"] is None)
 
 
+def test_get_pending_person_match_queue_excludes_vls_at_query_level():
+    """Route just passes through repo's own VLS-excluding query -- this
+    test pins that the response can legitimately contain elektrica AND
+    collision rows together (repo.list_pending_person_match_queue_items()
+    is the enforcement point, tested more directly below)."""
+    rows = [
+        {
+            "id": 2, "candidate_person_id": 37, "first_name": "Different",
+            "last_name": "QueueTest", "date_of_birth": date(1985, 5, 5),
+            "email_normalized": None, "phone_normalized": None,
+            "match_reason": "name_dob_close_match", "source_project": "elektrica",
+            "submitted_by": "cron_http_smoke", "submitted_at": datetime(2026, 9, 5, 11, 7, 55),
+        },
+    ]
+    with patch("app.api.repo.list_pending_person_match_queue_items", return_value=rows):
+        r = client.get("/person-match-queue/pending")
+    check("test_get_pending_person_match_queue_status", r.status_code == 200, r.text)
+    check("test_get_pending_person_match_queue_one_row", len(r.json()) == 1)
+    check("test_get_pending_person_match_queue_source_project", r.json()[0]["source_project"] == "elektrica")
+
+
+def test_decide_person_match_queue_confirmed_match():
+    result = {
+        "queue_id": 2, "decision": "confirmed_match", "resulting_person_id": 37,
+        "source_project": "elektrica", "renter": _sample_renter(id=5, person_id=37),
+    }
+    with patch("app.api.repo.resolve_person_match_queue", return_value=result):
+        r = client.post("/person-match-queue/2/decision", json={
+            "decision": "confirmed_match", "actor": "jed",
+        })
+    check("test_decide_person_match_queue_confirmed_match_status", r.status_code == 200, r.text)
+    check("test_decide_person_match_queue_confirmed_match_person", r.json()["resulting_person_id"] == 37)
+    check("test_decide_person_match_queue_confirmed_match_renter", r.json()["renter"] is not None)
+
+
+def test_decide_person_match_queue_confirmed_split_no_renter_for_collision():
+    """source_project='collision' -- repo deliberately does not link an
+    elektrica.renter for a non-elektrica queue row; renter must be None."""
+    result = {
+        "queue_id": 9, "decision": "confirmed_split", "resulting_person_id": 99,
+        "source_project": "collision", "renter": None,
+    }
+    with patch("app.api.repo.resolve_person_match_queue", return_value=result):
+        r = client.post("/person-match-queue/9/decision", json={
+            "decision": "confirmed_split", "actor": "jed",
+        })
+    check("test_decide_person_match_queue_split_status", r.status_code == 200, r.text)
+    check("test_decide_person_match_queue_split_no_renter", r.json()["renter"] is None)
+
+
+def test_decide_person_match_queue_vls_refused_403():
+    """The VLS-refusal ValueError must surface as 403 (authorization
+    boundary), not 400/404 -- see app.api.decide_person_match_queue()'s
+    own docstring for why."""
+    with patch(
+        "app.api.repo.resolve_person_match_queue",
+        side_effect=ValueError("person_match_queue id=5 is source_project='vls' -- refuses"),
+    ):
+        r = client.post("/person-match-queue/5/decision", json={
+            "decision": "confirmed_match", "actor": "jed",
+        })
+    check("test_decide_person_match_queue_vls_refused_403", r.status_code == 403, r.text)
+
+
+def test_decide_person_match_queue_not_found_404():
+    with patch(
+        "app.api.repo.resolve_person_match_queue",
+        side_effect=ValueError("No person_match_queue row with id=999"),
+    ):
+        r = client.post("/person-match-queue/999/decision", json={
+            "decision": "confirmed_match", "actor": "jed",
+        })
+    check("test_decide_person_match_queue_not_found_404", r.status_code == 404, r.text)
+
+
+def test_decide_person_match_queue_already_resolved_400():
+    with patch(
+        "app.api.repo.resolve_person_match_queue",
+        side_effect=ValueError("person_match_queue id=2 already resolved (status='confirmed_match', resolved_by='jed')"),
+    ):
+        r = client.post("/person-match-queue/2/decision", json={
+            "decision": "confirmed_match", "actor": "jed",
+        })
+    check("test_decide_person_match_queue_already_resolved_400", r.status_code == 400, r.text)
+
+
 def test_get_renter_found():
     with patch("app.api.repo.get_renter", return_value=_sample_renter()):
         r = client.get("/renters/1")
@@ -1187,6 +1273,12 @@ if __name__ == "__main__":
         test_create_renter, test_get_renter_found, test_get_renter_not_found,
         test_get_renter_by_person_found, test_get_renter_by_person_not_found,
         test_intake_renter_attached, test_intake_renter_created, test_intake_renter_queued_has_no_renter,
+        test_get_pending_person_match_queue_excludes_vls_at_query_level,
+        test_decide_person_match_queue_confirmed_match,
+        test_decide_person_match_queue_confirmed_split_no_renter_for_collision,
+        test_decide_person_match_queue_vls_refused_403,
+        test_decide_person_match_queue_not_found_404,
+        test_decide_person_match_queue_already_resolved_400,
         test_create_rental, test_create_rental_bad_billed_to,
         test_get_rental_found, test_get_rental_not_found,
         test_transition_rental_success, test_transition_rental_illegal_returns_400,

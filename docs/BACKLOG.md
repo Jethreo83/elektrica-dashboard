@@ -7,6 +7,86 @@ from scratch or, worse, do it differently by accident.
 
 ---
 
+## RESOLVED 2026-09-05 (cron cycle) — platform.person_match_queue confirm-or-split admin action built
+
+**What:** `queue_id=2` had sat `pending` across multiple prior cron
+cycles because no admin action existed to resolve it — flagged
+repeatedly as "next up" in `docs/BUILD_LOG.md`. Closed this cycle:
+
+- `app/repository.py`: `list_pending_person_match_queue_items()` (query-
+  level `source_project <> 'vls'` filter — never even fetches a VLS row,
+  not just display-time filtering) and `resolve_person_match_queue()`
+  (`confirmed_match` uses the existing `candidate_person_id`;
+  `confirmed_split` inserts a brand-new `platform.person` row from the
+  queue's own submitted name/DOB/email/phone). Both REQUIRE a privileged
+  cursor — `elektrica_app` has **zero** grants, not even `SELECT`, on
+  `platform.person_match_queue` (confirmed by direct query against real
+  staging Postgres this cycle).
+- Hard VLS refusal, enforced in code not just convention: a
+  `source_project='vls'` row raises `ValueError` naming the
+  attorney-client-privilege boundary explicitly; the route maps this to
+  **403** (authorization boundary), not 400/404. This bot must never
+  resolve a VLS-domain identity match regardless of who calls the route.
+- For `source_project='elektrica'` resolutions only, also links (or
+  finds-existing) the resulting person as an `elektrica.renter` via the
+  same `create_renter_for_existing_person()` path `POST /renters/intake`
+  uses — a queued renter that finally resolves ends up in the identical
+  state a clean `attached`/`created` intake would have. Deliberately
+  does NOT do this for `source_project='collision'` rows (that
+  business's own linking is that repo's responsibility).
+- `app/api.py`: `GET /person-match-queue/pending`,
+  `POST /person-match-queue/{queue_id}/decision` — both on
+  `get_privileged_cursor()`. New Pydantic models
+  `PersonMatchQueueItemOut`/`PersonMatchQueueDecisionIn`/`...Out`.
+- Tests: 6 new mocked `test_api.py` cases (163/163 pytest, 124/124
+  manual runner), covering confirmed_match, confirmed_split with no
+  renter for a non-elektrica row, the VLS 403 refusal, 404, and the
+  already-resolved 400.
+
+**Live-verified against real staging Postgres, on the REAL long-pending
+row** (uvicorn port 8720, `neondb_owner`-class `DATABASE_URL` inline, no
+`ELEKTRICA_DB_SET_ROLE`): `GET /person-match-queue/pending` showed the
+real `queue_id=2` row (present since an earlier cycle) ->
+`POST /person-match-queue/2/decision` `confirmed_match` -> 200,
+`resulting_person_id=37`, `elektrica.renter` id=16 created -> re-ran
+`GET /person-match-queue/pending` -> now `[]`. Retried the same decision
+-> 400 (already resolved, correct). Nonexistent `queue_id=999999` -> 404.
+Bad `decision` value -> 400. Then inserted two FRESH synthetic rows
+(one `source_project='elektrica'`, one `'vls'`) via a scratch script to
+exercise paths the real data couldn't: `confirmed_split` on the
+elektrica row -> 200, new `platform.person` id=44 (name/DOB copied from
+the queue row, confirmed by direct SELECT), new `elektrica.renter` id=17
+-> `confirmed_match` on the vls row -> **403**, then confirmed by direct
+SELECT that the vls row was untouched (`status` still `pending`,
+`resolved_by` still `NULL`) — the refusal never touched the DB, not just
+returned an error to the caller. Server killed after; `netstat` confirmed
+no `LISTENING` socket left (only expected client-side `TIME_WAIT`
+residue). All scratch scripts (`_setup_queue_smoke.py`,
+`_verify_queue_state.py`, `_verify_split_person.py`) deleted immediately
+after use.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every prior smoke run in this repo): `platform.person` ids
+43 (throwaway candidate for the synthetic rows) and 44 (real
+`confirmed_split` result); `elektrica.renter` ids 16/17;
+`platform.person_match_queue` ids 2/3 now `resolved` (2 =
+`confirmed_match`, 3 = `confirmed_split`), id 4 (`vls`, deliberately
+`pending`) left as a permanent regression-guard example that this bot's
+own admin surface must never resolve it going forward.
+
+**Not done / explicitly deferred (unchanged):** no auth/session layer on
+any route; migrations 002-010/012-014 remain staging-only pending Jed's
+review; migration 007's `vls.case` grant-scope flag for Jed still open;
+frontend not started.
+
+**Next up:** with the person_match_queue gap now closed, frontend is the
+single largest remaining item (ADR-001 v2 §6/§9 places it last
+regardless) — worth spending a cycle surveying which routes exist today
+to scope a minimal first frontend screen, rather than starting frontend
+code blind.
+
+---
+
 ## RESOLVED 2026-09-05 (cron cycle, later) — email/phone normalization utility built
 
 **What:** the entry directly below this one (same date, earlier cycle)

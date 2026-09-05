@@ -1836,3 +1836,61 @@ a live, currently-unresolved example) and (b) frontend, still fully
 unstarted. Picking (a) next cycle by default since it is the smaller,
 more concrete gap and directly unblocks a currently-stuck real row.
 
+## 2026-09-05 (continuous cron cycle) -- platform.person_match_queue confirm-or-split admin action closed
+
+**Starting point:** clean tree, fetched origin/main first (matched local
+HEAD at f601a89, no concurrent-session drift).
+
+**What:** the previous cycle's own "Next up" pointed straight at this --
+`queue_id=2` had sat `pending` since it was first created, because no
+admin action existed to resolve a `person_match_queue` row. Full details
+logged in `docs/BACKLOG.md`'s matching 2026-09-05 entry (kept there per
+this repo's own split: BACKLOG.md for decided-not-yet-actionable items
+that just became actionable, BUILD_LOG.md for the narrative). Summary:
+`repo.list_pending_person_match_queue_items()` +
+`repo.resolve_person_match_queue()` (confirmed_match / confirmed_split),
+both gated behind `get_privileged_cursor()`, both hard-refuse
+`source_project='vls'` rows in code (403), `confirmed_match`/`split`
+additionally link an `elektrica.renter` when the row's `source_project`
+is `'elektrica'` (never for `'collision'`). Two new routes:
+`GET /person-match-queue/pending`, `POST /person-match-queue/{id}/decision`.
+
+**Tests:** 6 new mocked `test_api.py` cases -- **163/163 pytest** (up
+from 157/157), **124/124** manual runner.
+
+**Live-verified against real staging Postgres, on the actual
+long-pending row, not just synthetic data:** uvicorn port 8720,
+`neondb_owner`-class `DATABASE_URL` inline, no `ELEKTRICA_DB_SET_ROLE`.
+Resolved the REAL `queue_id=2` via `confirmed_match` -> `person_id=37`,
+new `elektrica.renter` id=16 -> `GET /pending` now empty. Retried same
+decision -> 400. Nonexistent id -> 404. Bad decision string -> 400.
+Inserted two fresh synthetic rows to reach the two paths the real data
+couldn't: a `source_project='elektrica'` row through `confirmed_split`
+(-> 200, new `platform.person` id=44, new `elektrica.renter` id=17,
+name/DOB verified copied correctly by direct SELECT) and a
+`source_project='vls'` row through `confirmed_match` (-> **403**, then
+DIRECTLY queried the row afterward to confirm it was NOT mutated --
+`status` still `pending`, `resolved_by` still `NULL` -- the refusal is a
+hard no-op on the DB, not just an error response with a silent side
+effect). Server killed after; `netstat` confirmed no `LISTENING` socket
+left, only expected client-side `TIME_WAIT`. All three scratch scripts
+used for this deleted immediately after use, same standing discipline
+as every prior cycle's smoke scripts.
+
+**Staging residue left intentionally:** `platform.person` ids 43/44;
+`elektrica.renter` ids 16/17; `person_match_queue` ids 2/3 now resolved,
+id 4 (`vls`) deliberately left `pending` forever as a permanent
+regression-guard fixture proving this bot's admin surface refuses to
+touch VLS rows.
+
+**Not done / explicitly deferred (unchanged):** no auth/session layer on
+any route; migrations 002-010/012-014 staging-only pending Jed's review;
+migration 007's `vls.case` grant-scope flag still open; frontend not
+started.
+
+**Next up:** the person_match_queue gap that persisted across several
+cycles is finally closed. Frontend (ADR-001 v2 SS6/SS9, explicitly last in
+build order) is now the only large unstarted front -- worth a cycle
+surveying the full existing route surface first to scope a minimal first
+screen deliberately, rather than guessing at scope mid-build.
+
