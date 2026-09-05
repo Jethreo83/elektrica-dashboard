@@ -315,6 +315,24 @@ def get_rental(cur, rental_id: int) -> Optional[Rental]:
     return _rental_from_row(row) if row else None
 
 
+def list_rentals(cur, current_state: Optional[RentalState] = None) -> list[Rental]:
+    """Dashboard gap closed 2026-09-05: there was no general 'list every
+    rental' route, only /rentals/blocked (a filtered subset via the
+    blocked_rentals view) and get-by-id. A real 'current rentals' landing
+    screen needs a plain index, same no-status-filter-by-default
+    convention as list_rental_events/list_tolls_for_rental (an optional
+    current_state filter is supported since the dashboard also wants to
+    slice by state, e.g. 'active' rentals only)."""
+    if current_state is not None:
+        cur.execute(
+            "SELECT * FROM elektrica.rental WHERE current_state = %s ORDER BY id DESC",
+            (current_state.value,),
+        )
+    else:
+        cur.execute("SELECT * FROM elektrica.rental ORDER BY id DESC")
+    return [_rental_from_row(r) for r in cur.fetchall()]
+
+
 def advance_rental_state(
     cur, rental_id: int, target: RentalState, source: EventSource, actor: str,
     source_ref: Optional[str] = None, notes: Optional[str] = None,

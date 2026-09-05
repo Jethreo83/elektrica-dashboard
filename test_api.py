@@ -425,6 +425,26 @@ def test_get_rental_not_found():
     check("test_get_rental_not_found", r.status_code == 404)
 
 
+def test_list_rentals_no_filter():
+    with patch("app.api.repo.list_rentals", return_value=[_sample_rental()]) as mock_list:
+        r = client.get("/rentals")
+    check("test_list_rentals_status", r.status_code == 200, r.text)
+    check("test_list_rentals_body", len(r.json()) == 1 and r.json()[0]["current_state"] == "needs_demand")
+    check("test_list_rentals_no_filter_arg", mock_list.call_args[0][1] is None)
+
+
+def test_list_rentals_with_state_filter():
+    with patch("app.api.repo.list_rentals", return_value=[]) as mock_list:
+        r = client.get("/rentals?current_state=active")
+    check("test_list_rentals_filter_status", r.status_code == 200, r.text)
+    check("test_list_rentals_filter_arg", mock_list.call_args[0][1] == RentalState.ACTIVE)
+
+
+def test_list_rentals_bad_state_filter():
+    r = client.get("/rentals?current_state=not_real")
+    check("test_list_rentals_bad_filter", r.status_code == 400, r.text)
+
+
 def test_transition_rental_success():
     updated = _sample_rental(current_state=RentalState.DEMAND_SENT)
     with patch("app.api.repo.advance_rental_state", return_value=updated) as mock_adv:

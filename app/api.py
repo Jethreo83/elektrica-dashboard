@@ -1150,6 +1150,29 @@ def get_blocked_rentals(cur=Depends(get_cursor)):
     return repo.list_blocked_rentals(cur)
 
 
+@app.get("/rentals", response_model=list[RentalOut])
+def list_rentals(current_state: Optional[str] = None, cur=Depends(get_cursor)):
+    """Dashboard gap closed 2026-09-05 (this frontend build): the
+    'current rentals' landing screen needs a plain index -- previously
+    only /rentals/blocked (a filtered view) and get-by-id existed.
+    Optional ?current_state= filter, validated the same way every other
+    enum query param in this file is. Registered before /rentals/{id}
+    for the same route-ordering reason as /rentals/blocked above (this
+    IS still a literal path with no int param, so no actual collision
+    risk, but keeping it adjacent to the other /rentals-prefixed routes
+    for readability)."""
+    state = None
+    if current_state is not None:
+        try:
+            state = RentalState(current_state)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"current_state={current_state!r} must be one of {[s.value for s in RentalState]}",
+            )
+    return [_rental_to_out(r) for r in repo.list_rentals(cur, state)]
+
+
 @app.get("/rentals/{rental_id}", response_model=RentalOut)
 def get_rental(rental_id: int, cur=Depends(get_cursor)):
     rental = repo.get_rental(cur, rental_id)
