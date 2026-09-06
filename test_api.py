@@ -469,6 +469,19 @@ def test_create_rental_bad_billed_to():
     check("test_create_rental_bad_billed_to", r.status_code == 400, r.text)
 
 
+def test_create_rental_bad_ids_returns_400_not_500():
+    """Real bug found via live staging (2026-09-05 cron cycle, RentalListPage
+    'Start a Rental' form): a nonexistent vehicle_id or renter_id violates
+    rental_vehicle_id_fkey/rental_renter_id_fkey and previously surfaced as
+    a bare 500, unlike link_vls_case (same file, same fkey-violation shape,
+    already had a 400 handler for over a day before this route's own gap
+    was found). Mocked here since a real FK violation can't be triggered
+    without a DB."""
+    with patch("app.api.repo.create_rental", side_effect=psycopg2.errors.ForeignKeyViolation()):
+        r = client.post("/rentals", json={"vehicle_id": 999999, "renter_id": 1, "actor": "jed"})
+    check("test_create_rental_bad_ids_returns_400_not_500", r.status_code == 400, r.text)
+
+
 def test_get_rental_found():
     with patch("app.api.repo.get_rental", return_value=_sample_rental()):
         r = client.get("/rentals/1")
@@ -1569,6 +1582,7 @@ if __name__ == "__main__":
         test_decide_person_match_queue_not_found_404,
         test_decide_person_match_queue_already_resolved_400,
         test_create_rental, test_create_rental_bad_billed_to,
+        test_create_rental_bad_ids_returns_400_not_500,
         test_list_rentals_no_filter, test_list_rentals_with_state_filter, test_list_rentals_bad_state_filter,
         test_get_rental_found, test_get_rental_not_found,
         test_transition_rental_success, test_transition_rental_illegal_returns_400,

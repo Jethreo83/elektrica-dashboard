@@ -7,6 +7,31 @@ from scratch or, worse, do it differently by accident.
 
 ---
 
+## RESOLVED 2026-09-05 (cron cycle, later still) — RentalListPage had no way to start a rental; POST /rentals 500->400 bug found and fixed
+
+**What:** `POST /rentals` and `api.createRental()` had existed since the
+earliest cycles but no frontend page ever called them — no dashboard
+button to actually start a rental (handoff §2.2 step 2). Closed via a
+new "Start a Rental" form on `web/src/pages/RentalListPage.tsx`. While
+live-verifying it against real staging, found and fixed a real bug:
+`create_rental()` (`app/api.py`) had no handler for
+`psycopg2.errors.ForeignKeyViolation` on a bad `vehicle_id`/`renter_id`,
+so it returned a bare 500 instead of 400 — same failure shape
+`link_vls_case()` already handles correctly, just never applied here.
+See `docs/BUILD_LOG.md`'s matching entry for the full writeup (187/187
+pytest, 148/148 manual runner, live HTTP verification against real
+staging proving both the new form's happy path and the bad-id 500->400
+fix). Nothing further to do here; kept as a resolved marker.
+
+**New item surfaced (not urgent, no design decision needed):** worth a
+future cycle doing a deliberate sweep of every route in `app/api.py` for
+this same "repo can raise a raw psycopg2 exception with no handler"
+shape — this cycle found the `create_rental` instance by accident while
+verifying an unrelated frontend gap, not from a systematic check. No
+other instances confirmed yet, just not ruled out either.
+
+---
+
 ## RESOLVED 2026-09-05 (cron cycle) — carrier edit-after-creation
 
 **What:** the last still-open CarriersPage small item ("CarriersPage can

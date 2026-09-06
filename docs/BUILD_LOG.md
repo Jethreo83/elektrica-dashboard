@@ -3,6 +3,118 @@
 Running log of decisions and file changes, for Jed's review without needing
 to re-read full agent transcripts.
 
+## 2026-09-05 (cron cycle, later still) — RentalListPage "Start a Rental" form built; found and fixed a real 500->400 bug it exposed
+
+**Starting point:** `git fetch` first — up to date at `960a349`, clean
+tree. Ran `python -m pytest` (186/186) and `python test_api.py`
+(147/147) before touching anything.
+
+**What this closes:** with the previous cycle's own frontend-route-surface
+audit having confirmed every page calls the route it should, one gap from
+that audit's own scope had gone unaddressed: `POST /rentals` and
+`api.createRental()` (`web/src/api.ts`) have both existed since the
+earliest backend/frontend cycles, but no page ever called it.
+`FleetListPage` only lets staff add a vehicle; `DemandsPage` only lets
+staff create a demand for an ALREADY-existing rental. There was no
+dashboard button to actually start a rental — the very first operational
+step of the claim-generation-machine flow (handoff §2.2 step 2, "vehicle
+goes out"). A staff user could add a vehicle to the fleet and create
+demands, but never actually put a vehicle "out" through the UI.
+
+- `web/src/pages/RentalListPage.tsx`: new "Start a Rental" section above
+  the existing rentals table/filter — vehicle_id/renter_id (plain numeric
+  id entry, no picker: no `GET /renters` list route exists on the backend
+  to populate one, and building that route wasn't in scope for this
+  cycle), body_shop/rental_type free text, billed_to dropdown (matches
+  the real `RentalBilledTo` enum), start/end date pickers. Calls the
+  existing `api.createRental()` unchanged; on success, reloads the
+  rentals list respecting whatever state filter was already active.
+- `npx tsc -b` and `npm run build` both clean (290KB JS bundle).
+
+**Real bug found and fixed while live-verifying this against real
+staging (not simulated):** `POST /rentals` with a nonexistent
+`vehicle_id` or `renter_id` returned a bare 500, not a 400 — confirmed by
+the actual uvicorn traceback: `psycopg2.errors.ForeignKeyViolation:
+insert or update on table "rental" violates foreign key constraint
+"rental_vehicle_id_fkey"`, completely unhandled in `create_rental()`
+(`app/api.py`). This is the *exact* same failure shape `link_vls_case()`
+(same file) already has a `except psycopg2.errors.ForeignKeyViolation`
+handler for — that fix landed in an earlier cycle for one route and was
+never applied to this one, even though this route is now the one a real
+staff user would hit first via a form with free-typed ids. Fixed by
+mirroring `link_vls_case`'s existing handler exactly: `create_rental()`
+now catches `ForeignKeyViolation` and raises `HTTPException(400, ...)`
+naming both ids so the frontend's caught error renders a real message
+instead of a raw fetch failure.
+
+- `test_api.py`: new `test_create_rental_bad_ids_returns_400_not_500`
+  (mocked `ForeignKeyViolation` side effect, same pattern as
+  `test_link_vls_case_bad_vls_case_id_returns_400_not_500`). Both suites
+  green after: 187/187 pytest (was 186), 148/148 manual runner (was 147).
+
+**Live-verified against real staging Postgres, real HTTP round trip**
+(resolved the genuine staging connection via `neon connection-string
+staging --project-id aged-art-92489373 --role-name neondb_owner` for host
++ the Neon API's `reveal_password` for the credential, confirmed via
+`neon branches list` and `current_database()`/`inet_server_addr()` before
+connecting — this shell's own exported `DATABASE_URL` was not trusted
+without checking, same standing lesson as every prior cycle):
+
+1. Repository-layer script (`scripts/_cron_verify_create_rental.py`,
+   deleted after use): created a throwaway vehicle + `platform.person` +
+   renter, called `repo.create_rental()` with the exact payload shape the
+   new form sends — succeeded (rental id 14), read back correctly. A
+   first attempt using a plain string `status="available"` instead of
+   the `VehicleStatus` enum raised `AttributeError` inside
+   `repo.create_vehicle()` before ever reaching the DB — confirmed via a
+   direct follow-up query that the transaction rolled back cleanly (the
+   partially-created vehicle id from that failed attempt does not exist
+   in `elektrica.vehicle`), so no bad data was left from the mistake.
+2. Real HTTP round trip: booted a scratch `uvicorn` (port 8931) against
+   the real staging DB with a throwaway `JWT_SECRET`, minted a matching
+   HS256 JWT for `jed@elektricarentals.com` (a real, active `owner` row
+   in `elektrica.staff_user` on staging) to pass `require_staff`
+   legitimately. `POST /vehicles` -> 200 (id 18) -> `POST /renters`
+   (existing person_id 54) -> 200 (returned existing renter id 22, no
+   duplicate) -> `POST /rentals` with the new form's exact payload shape
+   -> 200, rental id 15, `current_state: active` -> confirmed it appears
+   in `GET /rentals?current_state=active`. Then exercised the error
+   path that turned out to be broken: `POST /rentals` with
+   `vehicle_id=999999` -> **500** (bug confirmed live, traceback captured
+   from the server's own log). Fixed the code, killed and restarted the
+   server against the same staging DB, re-ran the exact same bad-id
+   request -> now **400** with a clear message; bad `renter_id` -> also
+   400; a legitimate create immediately after -> still 200 (rental id
+   23) — the fix doesn't block real creates, only the bad-input path.
+   Server killed after each round; `netstat` confirmed no `LISTENING`
+   socket remained on either port (8931, 8932) afterward.
+
+**Staging residue left intentionally** (same append-only-adjacent
+reasoning as every other smoke run in this repo): `elektrica.vehicle` ids
+17 (repo-layer script) and 18 (HTTP round trip); `platform.person` id 54
+and `elektrica.renter` id 22 (shared across both verification passes,
+since the second pass deliberately reused the first's renter to prove
+`POST /renters` correctly returns the existing row rather than
+duplicating); `elektrica.rental` ids 14, 15, 23 (all three throwaway,
+none touch a real Jed-entered vehicle/renter).
+
+**Not done / explicitly deferred (unchanged):** no vehicle/renter
+picker on the new form (would need new list routes not in this cycle's
+scope); `elektrica.vehicle` promotion still pending Jed's explicit
+sign-off; migration 007's `vls.case` grant-scope flag still open; real
+Fleet columns still needs Jed's scoping decision; `insurer_payment`
+historical import still export-blocked.
+
+**Next up:** worth checking whether any OTHER route sharing this same
+"repo raises a raw DB exception, route has no handler for it" shape
+exists beyond `create_rental`/`link_vls_case` — this cycle found one
+instance by accident while live-verifying a frontend gap, not from a
+deliberate sweep of every route's exception handling.
+
+**Committed:** `app/api.py`, `test_api.py`, `web/src/pages/RentalListPage.tsx`.
+
+---
+
 ## 2026-09-03 — ADR-001 v2 read, build not yet started
 
 - Read `docs/ADR-001-elektrica-rentals-v2.md` (approved) and

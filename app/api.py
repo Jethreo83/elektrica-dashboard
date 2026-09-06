@@ -1185,7 +1185,28 @@ def create_rental(body: RentalIn, cur=Depends(get_cursor)):
         end_date=body.end_date, assignment_document_ref=body.assignment_document_ref,
         drive_folder_ref=body.drive_folder_ref, jotform_submission_ref=body.jotform_submission_ref,
     )
-    return _rental_to_out(repo.create_rental(cur, rental, body.actor))
+    try:
+        return _rental_to_out(repo.create_rental(cur, rental, body.actor))
+    except psycopg2.errors.ForeignKeyViolation:
+        # Found this cycle (real bug, not simulated): a nonexistent
+        # vehicle_id or renter_id previously fell through to a bare 500
+        # -- rental.vehicle_id_fkey / rental.renter_id_fkey raise
+        # ForeignKeyViolation with no ValueError translation anywhere in
+        # repo.create_rental(), unlike link_vls_case() (this file, a few
+        # hundred lines up) which already has this exact handler for its
+        # own FK. Client-input error (a bad id the caller supplied), not
+        # a server fault, so 400 not a bare 500 -- same discipline as
+        # that existing handler and the document-templates
+        # duplicate-version 500->409 fix. get_cursor()'s db.cursor()
+        # context manager rolls back on any exception propagating out
+        # of the route, so no manual rollback needed here.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot create rental: vehicle_id={body.vehicle_id!r} or "
+                f"renter_id={body.renter_id!r} does not exist."
+            ),
+        )
 
 
 @app.get("/rentals/blocked")
